@@ -46,7 +46,15 @@ export function emptyState() {
     frontend: null,
     core: { reachable: false, version: null, error: null, tun: false, mixedPort: null, mode: null },
     systemProxy: null,
-    sidecar: { running: false, pid: null, httpPort: 8899, socksPort: 8898, httpOpen: false, socksOpen: false },
+    sidecar: {
+      running: false,
+      installed: false,
+      pid: null,
+      httpPort: 8899,
+      socksPort: 8898,
+      httpOpen: false,
+      socksOpen: false,
+    },
     internalDomains: [],
     publicCount: 0,
     fakeCount: 0,
@@ -108,6 +116,7 @@ export async function collectState({
   try {
     const svc = await serviceStatus();
     state.sidecar.running = svc.running;
+    state.sidecar.installed = svc.installed;
     state.sidecar.pid = svc.pid;
   } catch {
     // 未安装时忽略

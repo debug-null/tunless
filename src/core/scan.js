@@ -23,6 +23,25 @@ const STATIC_TLDS = new Set([
   "mil", "int", "info", "biz", "name", "pro", "xyz", "top", "site", "online",
 ]);
 
+/**
+ * 权限不足时给出的授权指引。
+ * 要写清楚「在哪个设置面板、加哪个应用」，否则用户不知道怎么操作。
+ */
+export function fullDiskAccessHint() {
+  const program = process.env.TERM_PROGRAM || "";
+  const name = {
+    Apple_Terminal: "终端 (Terminal.app)",
+    iTerm: "iTerm",
+    Warp: "Warp",
+    vscode: "Visual Studio Code",
+    Hyper: "Hyper",
+  }[program] || program || "你正在用的终端";
+  return (
+    "chrome-history: 权限不足 — 打开「系统设置 → 隐私与安全性 → 完全磁盘访问权限」，" +
+    `把「${name}」加进去并打开开关，重启该应用后就能读到更多域名`
+  );
+}
+
 export function extractDomains(text) {
   if (!text) return [];
   const found = new Set();
@@ -137,16 +156,14 @@ export function scanChromeHistory() {
     return {
       hosts: [],
       sources: [],
-      notes: [
-        "chrome-history: 权限不足 — 请给终端授予「完全磁盘访问权限」以获取更完整的域名列表",
-      ],
+      notes: [fullDiskAccessHint()],
     };
   }
   if (typeof text === "object") {
     return {
       hosts: [],
       sources: [],
-      notes: ["chrome-history: 权限不足 — 请给终端授予「完全磁盘访问权限」以获取更完整的域名列表"],
+      notes: [fullDiskAccessHint()],
     };
   }
   const hosts = new Set();

@@ -5,13 +5,15 @@ import { Box, Text } from "ink";
 import { h, Section, Badge, Card, kv, txt, useTheme, useUnicode } from "./ui.js";
 import { padEnd, truncate, wrapText } from "./width.js";
 import { symbolSet } from "./theme.js";
+import { nextSteps } from "./help.js";
 
 export const PANELS = [
   { id: "overview", name: "总览", key: "1" },
-  { id: "domains", name: "内网域名", key: "2" },
-  { id: "processes", name: "程序代理能力", key: "3" },
-  { id: "routes", name: "分流规则", key: "4" },
-  { id: "events", name: "操作日志", key: "5" },
+  { id: "help", name: "怎么用", key: "2" },
+  { id: "domains", name: "内网域名", key: "3" },
+  { id: "processes", name: "程序代理能力", key: "4" },
+  { id: "routes", name: "分流规则", key: "5" },
+  { id: "events", name: "操作日志", key: "6" },
 ];
 
 /** 计算表格列宽，保证中文标题和内容对齐 */
@@ -130,9 +132,19 @@ export function OverviewPanel({ state, width }) {
   const coreCardRows = pad(coreRows);
   const sideCardRows = pad(sideRows);
 
+  const stepRows = nextSteps(state).map((step) => [
+    txt("  "),
+    step.key
+      ? txt(`按 ${step.key}`, { color: theme.colors.accent, bold: true })
+      : txt("说明", { dim: true }),
+    txt("  "),
+    txt(step.text),
+  ]);
+
   return h(
     Box,
     { flexDirection: "column" },
+    h(Card, { title: "下一步做什么", width: cardWidth, rows: stepRows }),
     twoColumn
       ? h(
           Box,

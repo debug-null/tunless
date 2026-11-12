@@ -18,6 +18,8 @@ import {
   RoutesPanel,
   EventsPanel,
 } from "./panels.js";
+import { HelpPanel } from "./help.js";
+import { isFirstRun, markSeen } from "./first-run.js";
 import { collectState, emptyState } from "./state.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -30,10 +32,11 @@ const PANEL_COMPONENTS = {
   processes: ProcessesPanel,
   routes: RoutesPanel,
   events: EventsPanel,
+  help: HelpPanel,
 };
 
 const DEFAULT_HINT =
-  "← → 切换面板 · r 刷新 · f 修复 · p 转发 · S 服务 · l 重启应用 · 1-5 切换 · / 过滤 · q 退出";
+  "← → 切换面板 · r 刷新 · f 修复 · S 服务 · l 重启应用 · / 过滤 · 2 用法 · q 退出";
 
 export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const { exit } = useApp();
@@ -41,7 +44,8 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const theme = useTheme();
 
   const [state, setState] = useState(emptyState);
-  const [panel, setPanel] = useState("overview");
+  // 第一次运行时先看「怎么用」，避免一头雾水
+  const [panel, setPanel] = useState(() => (isFirstRun() ? "help" : "overview"));
   const [events, setEvents] = useState([]);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState("");
@@ -119,7 +123,13 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const runService = useCallback(async () => {
     log("正在切换转发服务状态…", "info");
     const domain = `gui/${process.getuid?.() ?? 501}/dev.netfix.proxy`;
-    if (state.sidecar.running) {
+    if (!state.sidecar.installed) {
+      // 还没装成 launchd 服务，先装上（装完自动启动）
+      const { cmdService, setQuiet } = await import("../cli.js");
+      setQuiet(true);
+      await cmdService({ _: ["service", "install"] }, { quiet: true });
+      log("转发服务已安装并启动", "ok");
+    } else if (state.sidecar.running) {
       await exec("launchctl", ["bootout", domain], { timeout: 15000 });
       log("转发服务已停止", "warn");
     } else {
@@ -127,7 +137,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       log("转发服务已启动", "ok");
     }
     await refresh();
-  }, [state.sidecar.running, log, refresh]);
+  }, [state.sidecar.running, state.sidecar.installed, log, refresh]);
 
   const runLaunch = useCallback(async () => {
     const app = "Antigravity";
@@ -174,6 +184,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   // 首次进入自动采集一次。
   useEffect(() => {
     refresh();
+    markSeen();
   }, [refresh]);
 
   // 每秒刷新一次「更新于」时间显示。
@@ -269,6 +280,10 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       switchPanel(hit.id);
       return;
     }
+    if (input === "h" || input === "?") {
+      switchPanel("help");
+      return;
+    }
 
     switch (input) {
       case "r":
@@ -318,9 +333,10 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         )
       : null;
 
+  const helpText = panel === "help" ? "← 回到总览 · r 刷新 · q 退出" : DEFAULT_HINT;
   const help = searching
     ? h(Text, { color: theme.colors.info }, `搜索：${query}▏（回车确认，Esc 取消）`)
-    : h(Text, { dimColor: true }, hint || DEFAULT_HINT);
+    : h(Text, { dimColor: true }, hint || helpText);
 
   return h(
     Box,
@@ -329,7 +345,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       Box,
       { flexDirection: "row", justifyContent: "space-between" },
       h(Text, { color: theme.colors.accent, bold: true }, " netfix "),
-      h(Text, { dimColor: true }, "代理与内网诊断工具"),
+      h(Text, { dimColor: true }, "代理与内网诊断工具 · 不知道从哪开始就看第 6 个面板"),
       right,
     ),
     h(Tabs, { items: PANELS, activeId: panel }),
