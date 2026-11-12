@@ -1,206 +1,128 @@
-// TUI 主程序：负责渲染循环、按键分发和各类操作。
+// TUI 主程序：基于 ink 的图形界面。
+//
+// 负责整体布局、按键分发，以及刷新／修复／转发／服务／重启等操作。
 
-import { Screen } from "./screen.js";
-import { createKeyParser } from "./keys.js";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { render, Box, Text, useApp, useInput, useStdout } from "ink";
+import { h } from "./ui.js";
+import { TONE } from "./theme.js";
+import { PANELS, OverviewPanel, DomainsPanel, ProcessesPanel, RoutesPanel, EventsPanel } from "./panels.js";
 import { collectState, emptyState } from "./state.js";
-import {
-  PANELS,
-  renderOverview,
-  renderDomains,
-  renderProcesses,
-  renderRoutes,
-  renderEvents,
-  renderFooter,
-} from "./panels.js";
-import { c, badge } from "./theme.js";
-import { displayWidth } from "./width.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 const exec = promisify(execFile);
 
-const RENDERERS = {
-  overview: renderOverview,
-  domains: renderDomains,
-  processes: renderProcesses,
-  routes: renderRoutes,
+const PANEL_COMPONENTS = {
+  overview: OverviewPanel,
+  domains: DomainsPanel,
+  processes: ProcessesPanel,
+  routes: RoutesPanel,
+  events: EventsPanel,
 };
 
-export class TuiApp {
-  constructor({ internalDns, repoRoots = [], includeChrome = false } = {}) {
-    this.internalDns = internalDns;
-    this.repoRoots = repoRoots;
-    this.includeChrome = includeChrome;
-    this.screen = new Screen();
-    this.state = emptyState();
-    this.panel = "overview";
-    this.events = [];
-    this.dirty = false;
-    this.busy = false;
-    this.progress = "";
-    this.hint = "";
-    this.running = false;
-    this.refreshTimer = null;
-  }
+const DEFAULT_HINT = "r 刷新 · f 修复 · p 转发 · S 服务 · l 重启应用 · 1-5 切换 · q 退出";
 
-  log(text, kind = "info") {
+export function App({ internalDns, repoRoots = [], includeChrome = false }) {
+  const { exit } = useApp();
+  const { stdout } = useStdout();
+
+  const [state, setState] = useState(emptyState);
+  const [panel, setPanel] = useState("overview");
+  const [events, setEvents] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState("");
+  const [hint, setHint] = useState("");
+  const [scroll, setScroll] = useState(0);
+  const [searching, setSearching] = useState(false);
+  const [query, setQuery] = useState("");
+
+  // 供事件回调读取最新状态，避免把回调塞进依赖数组。
+  const busyRef = useRef(false);
+  busyRef.current = busy;
+
+  const log = useCallback((text, kind = "info") => {
     const time = new Date().toLocaleTimeString("zh-CN", { hour12: false });
-    this.events.push({ time, text, kind });
-    if (this.events.length > 200) this.events.shift();
-  }
+    setEvents((prev) => {
+      const next = [...prev, { time, text, kind }];
+      return next.length > 200 ? next.slice(next.length - 200) : next;
+    });
+  }, []);
 
-  async start() {
-    this.running = true;
-    this.screen.start();
-    this.log("netfix 启动");
-
-    if (process.stdin.isTTY) process.stdin.setRawMode(true);
-    process.stdin.resume();
-    process.stdin.setEncoding("utf8");
-
-    const parser = createKeyParser((key) => this.onKey(key));
-    this.onStdin = (chunk) => parser.handler(chunk);
-    process.stdin.on("data", this.onStdin);
-
-    process.on("SIGINT", () => this.quit());
-    process.on("SIGTERM", () => this.quit());
-
-    this.draw();
-    await this.refresh();
-    this.timer = setInterval(() => this.draw(), 1000);
-  }
-
-  quit() {
-    if (!this.running) return;
-    this.running = false;
-    if (this.timer) clearInterval(this.timer);
-    process.stdin.off("data", this.onStdin);
-    if (process.stdin.isTTY) process.stdin.setRawMode(false);
-    process.stdin.pause();
-    this.screen.stop();
-    process.exit(0);
-  }
-
-  async refresh() {
-    this.busy = true;
-    this.progress = "正在启动…";
-    this.draw();
+  const refresh = useCallback(async () => {
+    setBusy(true);
+    setProgress("正在启动…");
     try {
-      // 采集是分阶段的，每拿到一部分就更新界面，
-      // 避免几秒钟的空白等待。
       const next = await collectState({
-        internalDns: this.internalDns,
-        repoRoots: this.repoRoots,
-        includeChrome: this.includeChrome,
+        internalDns,
+        repoRoots,
+        includeChrome,
         onProgress: (stage, partial) => {
-          this.progress = stage;
-          this.state = { ...this.state, ...partial };
-          this.draw();
+          setProgress(stage);
+          setState((prev) => ({ ...prev, ...partial }));
         },
       });
-      this.state = next;
-      this.log(`状态已更新（内网域名 ${this.state.internalDomains.length} 个）`, "ok");
+      setState(next);
+      log(`状态已更新（内网域名 ${next.internalDomains.length} 个）`, "ok");
     } catch (err) {
-      this.log(`刷新失败：${err.message}`, "bad");
+      log(`刷新失败：${err.message}`, "bad");
     }
-    this.busy = false;
-    this.progress = "";
-    this.dirty = false;
-    this.draw();
-  }
+    setBusy(false);
+    setProgress("");
+  }, [internalDns, repoRoots, includeChrome, log]);
 
-
-  async runAction(name) {
-    if (this.busy) {
-      this.hint = "正在处理中，请稍候";
-      this.draw();
-      return;
-    }
-    this.busy = true;
-    this.hint = "";
-    try {
-      switch (name) {
-        case "refresh":
-          await this.refresh();
-          return;
-        case "fix":
-          await this.runFix();
-          return;
-        case "proxy":
-          await this.runProxy();
-          return;
-        case "service":
-          await this.runService();
-          return;
-        case "launch":
-          await this.runLaunch();
-          return;
-        default:
-          break;
-      }
-    } catch (err) {
-      this.log(`操作失败：${err.message}`, "bad");
-    }
-    this.busy = false;
-    this.draw();
-  }
-
-  async runFix() {
-    this.log("开始诊断并生成修复方案…", "info");
-    this.draw();
+  const runFix = useCallback(async () => {
+    log("开始诊断并生成修复方案…", "info");
     const { cmdFix, setQuiet } = await import("../cli.js");
     setQuiet(true);
-    const args = {
-      _: ["fix"],
-      flags: {
-        "internal-dns": this.internalDns,
-        "no-chrome": this.includeChrome ? false : true,
-        yes: true,
+    const code = await cmdFix(
+      {
+        _: ["fix"],
+        flags: {
+          "internal-dns": internalDns,
+          "no-chrome": includeChrome ? false : true,
+          yes: true,
+        },
       },
-    };
-    const code = await cmdFix(args, { quiet: true });
-    this.log(code === 0 ? "修复完成" : "修复未完成或已回滚", code === 0 ? "ok" : "warn");
-    await this.refresh();
-  }
+      { quiet: true },
+    );
+    log(code === 0 ? "修复完成" : "修复未完成或已回滚", code === 0 ? "ok" : "warn");
+    await refresh();
+  }, [internalDns, includeChrome, log, refresh]);
 
-  async runProxy() {
-    const running = this.state.sidecar.running;
-    if (running) {
-      this.log("转发服务已在运行", "warn");
+  const runProxy = useCallback(async () => {
+    if (state.sidecar.running) {
+      log("转发服务已在运行", "warn");
       return;
     }
-    this.log("正在启动转发服务…", "info");
-    this.draw();
-    await exec("launchctl", [
-      "kickstart",
-      "-k",
-      `gui/${process.getuid?.() ?? 501}/dev.netfix.proxy`,
-    ], { timeout: 15000 }).catch((err) => {
+    log("正在启动转发服务…", "info");
+    await exec(
+      "launchctl",
+      ["kickstart", "-k", `gui/${process.getuid?.() ?? 501}/dev.netfix.proxy`],
+      { timeout: 15000 },
+    ).catch((err) => {
       throw new Error(`启动失败：${err.message}`);
     });
-    this.log("转发服务已启动", "ok");
-    await this.refresh();
-  }
+    log("转发服务已启动", "ok");
+    await refresh();
+  }, [state.sidecar.running, log, refresh]);
 
-  async runService() {
-    this.log("正在切换转发服务状态…", "info");
-    this.draw();
-    const running = this.state.sidecar.running;
+  const runService = useCallback(async () => {
+    log("正在切换转发服务状态…", "info");
     const domain = `gui/${process.getuid?.() ?? 501}/dev.netfix.proxy`;
-    if (running) {
+    if (state.sidecar.running) {
       await exec("launchctl", ["bootout", domain], { timeout: 15000 });
-      this.log("转发服务已停止", "warn");
+      log("转发服务已停止", "warn");
     } else {
       await exec("launchctl", ["kickstart", "-k", domain], { timeout: 15000 });
-      this.log("转发服务已启动", "ok");
+      log("转发服务已启动", "ok");
     }
-    await this.refresh();
-  }
+    await refresh();
+  }, [state.sidecar.running, log, refresh]);
 
-  async runLaunch() {
-    const app = this.launchTarget || "Antigravity";
-    this.log(`正在以 netfix 代理重启 ${app}…`, "info");
-    this.draw();
+  const runLaunch = useCallback(async () => {
+    const app = "Antigravity";
+    log(`正在以 netfix 代理重启 ${app}…`, "info");
     const { cmdLaunch, setQuiet } = await import("../cli.js");
     setQuiet(true);
     await cmdLaunch(
@@ -208,118 +130,207 @@ export class TuiApp {
         _: ["launch"],
         flags: {
           app,
-          "internal-dns": this.internalDns,
-          "no-chrome": this.includeChrome ? false : true,
+          "internal-dns": internalDns,
+          "no-chrome": includeChrome ? false : true,
         },
       },
       { quiet: true },
     );
-    this.log(`${app} 已重启`, "ok");
-    await this.refresh();
-  }
+    log(`${app} 已重启`, "ok");
+    await refresh();
+  }, [internalDns, includeChrome, log, refresh]);
 
-  onKey(key) {
-    if (key.name === "ctrl-c" || (key.name === "char" && key.char === "q")) {
-      this.quit();
-      return;
-    }
-    if (key.name === "char") {
-      const panel = PANELS.find((p) => p.key === key.char);
-      if (panel) {
-        this.panel = panel.id;
-        this.hint = "";
-        this.draw();
+  const runAction = useCallback(
+    async (name) => {
+      if (busyRef.current) {
+        setHint("正在处理中，请稍候");
         return;
       }
-      switch (key.char) {
-        case "r":
-          this.runAction("refresh");
-          return;
-        case "f":
-          this.runAction("fix");
-          return;
-        case "p":
-          this.runAction("proxy");
-          return;
-        case "S":
-          this.runAction("service");
-          return;
-        case "l":
-          this.runAction("launch");
-          return;
-        case "j":
-        case "down":
-          this.cycle(1);
-          return;
-        case "k":
-        case "up":
-          this.cycle(-1);
-          return;
-        case "s":
-          this.log("切换到总览", "info");
-          this.panel = "overview";
-          this.draw();
-          return;
-        default:
-          break;
+      setBusy(true);
+      setHint("");
+      try {
+        if (name === "refresh") await refresh();
+        else if (name === "fix") await runFix();
+        else if (name === "proxy") await runProxy();
+        else if (name === "service") await runService();
+        else if (name === "launch") await runLaunch();
+      } catch (err) {
+        log(`操作失败：${err.message}`, "bad");
       }
+      setBusy(false);
+    },
+    [refresh, runFix, runProxy, runService, runLaunch, log],
+  );
+
+  // 首次进入自动采集一次。
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  // 每秒刷新一次「更新于」时间显示。
+  useEffect(() => {
+    const timer = setInterval(() => setState((prev) => ({ ...prev })), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const switchPanel = useCallback((id) => {
+    setPanel(id);
+    setScroll(0);
+    setHint("");
+  }, []);
+
+  useInput((input, key) => {
+    // 搜索模式：按键全部进入搜索框。
+    if (searching) {
+      if (key.escape) {
+        setSearching(false);
+        setQuery("");
+        setScroll(0);
+        return;
+      }
+      if (key.return) {
+        setSearching(false);
+        return;
+      }
+      if (key.backspace || key.delete) {
+        setQuery((q) => q.slice(0, -1));
+        setScroll(0);
+        return;
+      }
+      if (input && !key.ctrl && !key.meta) {
+        setQuery((q) => q + input);
+        setScroll(0);
+      }
+      return;
     }
-    if (key.name === "escape") {
-      this.hint = "";
-      this.draw();
+
+    if (input === "q") {
+      exit();
+      return;
     }
-  }
-
-  cycle(step) {
-    const idx = PANELS.findIndex((p) => p.id === this.panel);
-    const next = (idx + step + PANELS.length) % PANELS.length;
-    this.panel = PANELS[next].id;
-    this.draw();
-  }
-
-  draw() {
-    const width = this.screen.width;
-    const height = this.screen.height;
-    const lines = [];
-
-    // 标题栏
-    const title = ` netfix `;
-    const subtitle = c.dim("代理与内网诊断工具");
-    const right = this.busy
-      ? c.yellow(this.progress || "正在采集…")
-      : this.state.updatedAt
-        ? c.dim(`更新于 ${this.state.updatedAt.toLocaleTimeString("zh-CN", { hour12: false })}`)
-        : c.dim("");
-    const gap = width - displayWidth(title) - displayWidth(subtitle) - displayWidth(right) - 4;
-    lines.push(
-      `${c.bold(c.brightCyan(title))} ${subtitle}${" ".repeat(Math.max(1, gap))}${right}`,
-    );
-    lines.push(c.dim(SYMBOLS_HLINE(width)));
-
-    const body = [];
-    if (this.panel === "events") {
-      body.push(...renderEvents(this.events, width));
-    } else {
-      const renderer = RENDERERS[this.panel];
-      body.push(...renderer(this.state, width));
+    if (key.upArrow || input === "k") {
+      setScroll((s) => Math.max(0, s - 1));
+      return;
+    }
+    if (key.downArrow || input === "j") {
+      setScroll((s) => s + 1);
+      return;
+    }
+    if (key.pageUp) {
+      setScroll((s) => Math.max(0, s - 10));
+      return;
+    }
+    if (key.pageDown) {
+      setScroll((s) => s + 10);
+      return;
+    }
+    if (input === "/") {
+      setSearching(true);
+      setQuery("");
+      setScroll(0);
+      return;
     }
 
-    const footerLines = renderFooter(width, {
-      active: this.panel,
-      dirty: this.dirty,
-      hint: this.hint || "r 刷新  ·  f 修复  ·  p 转发  ·  S 服务  ·  l 启动应用  ·  1-5 切换面板  ·  q 退出",
-    });
-
-    // 正文按可用高度裁剪，保证底部状态栏始终可见
-    const available = height - 2 - footerLines.length;
-    if (body.length > available) {
-      body.splice(available - 1, body.length - available + 1, c.dim("  ……（内容过多，按面板切换查看）"));
+    const hit = PANELS.find((p) => p.key === input);
+    if (hit) {
+      switchPanel(hit.id);
+      return;
     }
-    lines.push(...body);
-    lines.push(...footerLines);
 
-    this.screen.render(lines);
-  }
+    switch (input) {
+      case "r":
+        runAction("refresh");
+        return;
+      case "f":
+        runAction("fix");
+        return;
+      case "p":
+        runAction("proxy");
+        return;
+      case "S":
+        runAction("service");
+        return;
+      case "l":
+        runAction("launch");
+        return;
+      case "s":
+        switchPanel("overview");
+        return;
+      default:
+        break;
+    }
+  });
+
+  const width = stdout.columns || 80;
+  const rows = stdout.rows || 24;
+  const bodyHeight = Math.max(4, rows - 7);
+
+  const PanelComponent = PANEL_COMPONENTS[panel] ?? OverviewPanel;
+  const panelProps = {
+    state,
+    width,
+    height: bodyHeight,
+    scroll,
+    query,
+    events,
+  };
+
+  const right = busy
+    ? h(Text, { color: TONE.warn }, progress || "正在采集…")
+    : state.updatedAt
+      ? h(
+          Text,
+          { dimColor: true },
+          `更新于 ${state.updatedAt.toLocaleTimeString("zh-CN", { hour12: false })}`,
+        )
+      : h(Text, { dimColor: true }, "");
+
+  const tabs = h(
+    Box,
+    { flexDirection: "row", gap: 1 },
+    PANELS.map((p) =>
+      h(
+        Text,
+        {
+          key: p.id,
+          color: p.id === panel ? TONE.accent : TONE.muted,
+          bold: p.id === panel,
+          inverse: p.id === panel,
+        },
+        ` ${p.key} ${p.name} `,
+      ),
+    ),
+  );
+
+  const help = searching
+    ? h(Text, { color: TONE.info }, `搜索：${query}▏（回车确认，Esc 取消）`)
+    : h(Text, { dimColor: true }, hint || DEFAULT_HINT);
+
+  return h(
+    Box,
+    { flexDirection: "column", height: rows },
+    h(
+      Box,
+      { flexDirection: "row", justifyContent: "space-between" },
+      h(Text, { color: TONE.accent, bold: true }, " netfix "),
+      h(Text, { dimColor: true }, "代理与内网诊断工具"),
+      right,
+    ),
+    h(Box, { flexDirection: "row", justifyContent: "space-between" }, tabs, h(Text, { dimColor: true }, "")),
+    h(Box, { flexDirection: "column", flexGrow: 1, overflow: "hidden" }, h(PanelComponent, panelProps)),
+    h(Box, { flexDirection: "column" }, help, h(Text, { dimColor: true }, " ")),
+  );
 }
 
-const SYMBOLS_HLINE = (n) => "─".repeat(Math.max(0, n));
+/** 启动图形界面 */
+export async function runTui(options = {}) {
+  // 调试模式：每帧以纯文本追加输出，方便在没有终端模拟器时观察界面内容。
+  const debug = process.env.NETFIX_TUI_DEBUG === "1";
+  const instance = render(h(App, options), {
+    alternateScreen: !debug,
+    debug,
+    exitOnCtrlC: true,
+  });
+  await instance.waitUntilExit();
+  return 0;
+}

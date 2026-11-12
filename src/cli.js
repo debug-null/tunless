@@ -733,16 +733,14 @@ export async function main(argv) {
       console.error("图形界面需要交互式终端；请改用 netfix doctor 或 netfix scan。");
       return 1;
     }
-    const { TuiApp } = await import("./tui/app.js");
-    const app = new TuiApp({
+    const { runTui } = await import("./tui/app.js");
+    return await runTui({
       internalDns: args.flags["internal-dns"] || DEFAULT_INTERNAL_DNS,
       repoRoots: args.flags.repos
         ? String(args.flags.repos).split(",").map((s) => s.trim()).filter(Boolean)
         : [],
       includeChrome: args.flags["no-chrome"] !== true,
     });
-    await app.start();
-    return 0;
   }
 
   try {

@@ -7,12 +7,14 @@
 
 netfix 与具体客户端无关：它通过 REST 接口跟任何运行中的 [mihomo](https://github.com/MetaCubeX/mihomo) 内核通信，并为 Clash Verge Rev 提供适配器，把配置写进订阅更新后仍保留的 merge 增强层。
 
-零运行时依赖 —— 只用 Node 内置模块。
+核心逻辑零运行时依赖 —— 诊断、DNS 探测、配置读写全部只用 Node 内置模块。
+图形界面基于 [ink](https://github.com/vadimdemedes/ink) + React 构建（唯一的两个依赖），源码即运行，不需要编译步骤。
 
 ## 安装
 
 ```bash
 git clone <本仓库> ~/github/netfix
+cd ~/github/netfix && npm install      # 只装 ink 与 react
 mkdir -p ~/.local/bin
 ln -sf ~/github/netfix/bin/netfix.js ~/.local/bin/netfix
 chmod +x ~/github/netfix/bin/netfix.js
@@ -37,11 +39,19 @@ netfix service <操作>   # install | uninstall | status | logs
 ### 图形界面
 
 ```
-┌ netfix 代理与内网诊断工具 ─────────────────────────────
-│ 代理内核 / 内网概况
-│
-│ 1 总览 │ 2 内网域名 │ 3 程序代理能力 │ 4 分流规则 │ 5 操作日志
-│ r 刷新 · f 修复 · p 转发 · S 服务 · l 启动应用 · q 退出
+ netfix      代理与内网诊断工具                 更新于 20:51:55
+ 1 总览  2 内网域名  3 程序代理能力  4 分流规则  5 操作日志
+
+ 代理内核
+  客户端      Clash Verge Rev
+  内核版本    v1.19.33  rule 模式
+  TUN 模式    ▲ 已关闭 只有完全忽略代理的程序才需要它
+
+ 内网概况
+  内网域名    16 个解析到私网地址
+  归并后缀    17u.cn、17usoft.com、corp.elong.com
+
+ r 刷新 · f 修复 · p 转发 · S 服务 · l 重启应用 · 1-5 切换 · q 退出
 ```
 
 | 按键 | 作用 |
@@ -52,9 +62,11 @@ netfix service <操作>   # install | uninstall | status | logs
 | `p` | 启动转发服务 |
 | `S` | 启停转发服务 |
 | `l` | 用 netfix 代理重启应用 |
+| `j` / `k`、↑ / ↓ | 列表上下滚动 |
+| `/` | 在内网域名面板里按名字过滤 |
 | `q` | 退出 |
 
-界面按显示宽度排版，中文不会错位；窄终端（50 列以上）也不会溢出。
+界面基于 ink 的备用屏幕渲染（退出后恢复原终端内容），按显示宽度排版，中文不会错位；窄终端（50 列以上）也不会溢出。
 
 ### 选项
 

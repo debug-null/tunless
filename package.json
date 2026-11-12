@@ -19,5 +19,9 @@
     "clash",
     "network"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "ink": "^8.0.0",
+    "react": "^19.3.1"
+  }
 }
