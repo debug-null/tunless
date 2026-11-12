@@ -21,11 +21,7 @@ import {
 import { HelpPanel } from "./help.js";
 import { isFirstRun, markSeen } from "./first-run.js";
 import { collectState, emptyState } from "./state.js";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-
-const exec = promisify(execFile);
-
+import { startService, stopService } from "../core/launchd.js";
 const PANEL_COMPONENTS = {
   overview: OverviewPanel,
   domains: DomainsPanel,
@@ -36,7 +32,7 @@ const PANEL_COMPONENTS = {
 };
 
 const DEFAULT_HINT =
-  "← → 切换面板 · r 刷新 · f 修复 · S 服务 · l 重启应用 · / 过滤 · 2 用法 · q 退出";
+  "← → 切换面板 · r 刷新 · f 修复 · s 服务 · l 重启应用 · / 过滤 · 2 用法 · q 退出";
 
 export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const { exit } = useApp();
@@ -109,32 +105,39 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       return;
     }
     log("正在启动转发服务…", "info");
-    await exec(
-      "launchctl",
-      ["kickstart", "-k", `gui/${process.getuid?.() ?? 501}/dev.tunless.proxy`],
-      { timeout: 15000 },
-    ).catch((err) => {
-      throw new Error(`启动失败：${err.message}`);
-    });
-    log("转发服务已启动", "ok");
-    await refresh();
-  }, [state.sidecar.running, log, refresh]);
-
-  const runService = useCallback(async () => {
-    log("正在切换转发服务状态…", "info");
-    const domain = `gui/${process.getuid?.() ?? 501}/dev.tunless.proxy`;
     if (!state.sidecar.installed) {
-      // 还没装成 launchd 服务，先装上（装完自动启动）
       const { cmdService, setQuiet } = await import("../cli.js");
       setQuiet(true);
       await cmdService({ _: ["service", "install"] }, { quiet: true });
-      log("转发服务已安装并启动", "ok");
-    } else if (state.sidecar.running) {
-      await exec("launchctl", ["bootout", domain], { timeout: 15000 });
-      log("转发服务已停止", "warn");
     } else {
-      await exec("launchctl", ["kickstart", "-k", domain], { timeout: 15000 });
-      log("转发服务已启动", "ok");
+      await startService();
+    }
+    log("转发服务已启动", "ok");
+    await refresh();
+  }, [state.sidecar.running, state.sidecar.installed, log, refresh]);
+
+  const runService = useCallback(async () => {
+    log("正在切换转发服务状态…", "info");
+    try {
+      if (!state.sidecar.installed) {
+        // 还没装成 launchd 服务，先装上（装完自动启动）
+        const { cmdService, setQuiet } = await import("../cli.js");
+        setQuiet(true);
+        await cmdService({ _: ["service", "install"] }, { quiet: true });
+        log("转发服务已安装并启动", "ok");
+        setHint("转发服务已安装并启动，监听 127.0.0.1:8899");
+      } else if (state.sidecar.running) {
+        await stopService();
+        log("转发服务已停止", "warn");
+        setHint("转发服务已停止，再按 s 可以重新启动");
+      } else {
+        await startService();
+        log("转发服务已启动", "ok");
+        setHint("转发服务已启动，监听 127.0.0.1:8899");
+      }
+    } catch (err) {
+      log(`切换转发服务失败：${err.message}`, "bad");
+      setHint(`切换失败：${err.message}`);
     }
     await refresh();
   }, [state.sidecar.running, state.sidecar.installed, log, refresh]);
@@ -295,14 +298,14 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       case "p":
         runAction("proxy");
         return;
+      // 服务开关：大小写都接受。之前只有大写 S 有效，
+      // 而小写 s 被当成「回到总览」，按下去看起来毫无反应。
+      case "s":
       case "S":
         runAction("service");
         return;
       case "l":
         runAction("launch");
-        return;
-      case "s":
-        switchPanel("overview");
         return;
       default:
         break;

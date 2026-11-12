@@ -86,6 +86,39 @@ export async function uninstallService() {
   return { plist: PLIST_PATH };
 }
 
+/**
+ * 启动已安装的服务。
+ * bootout 会把任务从 launchd 里彻底注销，这时直接 kickstart 会失败，
+ * 所以先尝试 bootstrap（已注册时它会报错，忽略即可）。
+ */
+export async function startService({ port = 8899, timeoutMs = 10000 } = {}) {
+  if (!fs.existsSync(PLIST_PATH)) {
+    throw new Error("转发服务还没安装，请先运行 tunless service install");
+  }
+  await launchctl(["bootstrap", guiDomain(), PLIST_PATH], { ignoreFailure: true });
+  await launchctl(["enable", `${guiDomain()}/${LABEL}`], { ignoreFailure: true });
+  await launchctl(["kickstart", "-k", `${guiDomain()}/${LABEL}`]);
+  // launchd 拉起进程需要几百毫秒到几秒，端口没起来就刷新界面会显示「未运行」。
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await sidecarReachable("127.0.0.1", port, 500)) return serviceStatus();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  return serviceStatus();
+}
+
+/** 停止服务，并等到任务真的从 launchd 里消失，避免界面读到过期的 pid。 */
+export async function stopService({ timeoutMs = 5000 } = {}) {
+  await launchctl(["bootout", `${guiDomain()}/${LABEL}`], { ignoreFailure: true });
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const status = await serviceStatus();
+    if (!status.running) return status;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  return serviceStatus();
+}
+
 export async function serviceStatus() {
   const { stdout } = await launchctl(["print", `${guiDomain()}/${LABEL}`], { ignoreFailure: true });
   const installed = fs.existsSync(PLIST_PATH);
@@ -99,6 +132,23 @@ export async function serviceStatus() {
   };
 }
 
+/**
+ * 转发服务是否真的在提供代理：launchd 里的状态可能滞后，
+ * 端口能连上才算数。
+ */
+export async function sidecarReachable(host, port, timeoutMs = 800) {
+  const net = await import("node:net");
+  return new Promise((resolve) => {
+    const socket = net.connect({ host, port });
+    const done = (ok) => {
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.setTimeout(timeoutMs, () => done(false));
+    socket.once("connect", () => done(true));
+    socket.once("error", () => done(false));
+  });
+}
 export function readServiceLog(lines = 20, logDir = LOG_DIR) {
   const file = path.join(logDir, "proxy.log");
   if (!fs.existsSync(file)) return "";

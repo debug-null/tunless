@@ -121,7 +121,7 @@ tunless service <操作>   # install | uninstall | status | logs
 │   归并后缀    17u.cn、17usoft.com、corp.elong.com             │
 ╰────────────────────────────────────────────────────────────╯
 
-← → 切换面板 · r 刷新 · f 修复 · p 转发 · S 服务 · l 重启应用 · q 退出
+← → 切换面板 · r 刷新 · f 修复 · p 转发 · s 服务 · l 重启应用 · q 退出
 ```
 
 | 按键 | 作用 |
@@ -150,7 +150,7 @@ tunless service <操作>   # install | uninstall | status | logs
 
 | 参数 | 含义 |
 | --- | --- |
-| `--internal-dns <ip>` | 内网 DNS 服务器（默认 `10.249.150.130`） |
+| `--internal-dns <ip>` | 内网 DNs 服务器（默认 `10.249.150.130`） |
 | `--repos <路径>` | 逗号分隔的仓库根目录，用于扫描域名 |
 | `--no-chrome` | 跳过 Chrome 历史记录（需要完全磁盘访问权限） |
 | `--frontend <id>` | 指定前端：`clash-verge-rev` / `generic-mihomo` |

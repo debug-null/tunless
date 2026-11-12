@@ -125,6 +125,12 @@ export async function collectState({
   const socksOpen = await probePort("127.0.0.1", state.sidecar.socksPort);
   state.sidecar.httpOpen = httpOpen;
   state.sidecar.socksOpen = socksOpen;
+  // launchd 的状态可能滞后：任务已 bootout 但 print 仍报 running，
+  // 也可能 KeepAlive 正在拉起。以端口是否真的监听为准。
+  if (state.sidecar.running && !httpOpen && !socksOpen) {
+    state.sidecar.running = false;
+    state.sidecar.pid = null;
+  }
 
   notify("正在扫描域名…");
   // 域名扫描与解析。DNS 探测数量多、耗时长，这里限制并发，

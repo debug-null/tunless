@@ -27,13 +27,13 @@ export function nextSteps(state) {
 
   if (!state.sidecar.installed) {
     steps.push({
-      key: "S",
-      text: "转发服务还没装，按 S 安装并启动它（会监听 127.0.0.1:8899）",
+      key: "s",
+      text: "转发服务还没装，按 s 安装并启动它（会监听 127.0.0.1:8899）",
     });
   } else if (!state.sidecar.running) {
     steps.push({
-      key: "S",
-      text: "转发服务没在跑，按 S 启动它（会监听 127.0.0.1:8899）",
+      key: "s",
+      text: "转发服务没在跑，按 s 启动它（会监听 127.0.0.1:8899）",
     });
   } else {
     steps.push({
@@ -91,7 +91,7 @@ export function HelpPanel({ width }) {
   ];
 
   const stepsRows = [
-    kv("第 1 步", [txt("按 S 安装／启动转发服务，监听 127.0.0.1:8899")], 10),
+    kv("第 1 步", [txt("按 s 安装／启动转发服务，监听 127.0.0.1:8899")], 10),
     kv("第 2 步", [txt("按 l 用这个代理重启 Agent（默认 Antigravity）")], 10),
     kv("第 3 步", [txt("内网域名解析不对时按 f 生成并应用修复")], 10),
   ];
