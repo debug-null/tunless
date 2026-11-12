@@ -1,6 +1,6 @@
 {
   "name": "tunless",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Run AI agents without TUN mode: give proxy-blind tools a working local proxy and keep split-horizon internal domains off the proxy",
   "type": "module",
   "bin": {
@@ -37,6 +37,14 @@
     "cursor"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/debug-null/tunless.git"
+  },
+  "homepage": "https://github.com/debug-null/tunless#readme",
+  "bugs": {
+    "url": "https://github.com/debug-null/tunless/issues"
+  },
   "publishConfig": {
     "registry": "https://registry.npmjs.org/"
   },

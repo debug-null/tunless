@@ -67,8 +67,17 @@ macOS 会保护 `~/Library/Application Support/Google/Chrome/.../History`。想�
 
 ## 安装
 
+从 npm 安装（推荐）：
+
 ```bash
-git clone <本仓库> ~/github/tunless
+npm install -g tunless
+tunless
+```
+
+从源码运行：
+
+```bash
+git clone https://github.com/debug-null/tunless.git ~/github/tunless
 cd ~/github/tunless && npm install      # 只装 ink 与 react
 mkdir -p ~/.local/bin
 ln -sf ~/github/tunless/bin/tunless.js ~/.local/bin/tunless
