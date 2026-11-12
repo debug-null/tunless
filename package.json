@@ -1,0 +1,23 @@
+{
+  "name": "netfix",
+  "version": "0.1.0",
+  "description": "Diagnose and fix proxy/DNS misconfiguration for proxy-aware tools and split-horizon internal networks",
+  "type": "module",
+  "bin": {
+    "netfix": "./bin/netfix.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.js\""
+  },
+  "keywords": [
+    "proxy",
+    "dns",
+    "mihomo",
+    "clash",
+    "network"
+  ],
+  "license": "MIT"
+}
