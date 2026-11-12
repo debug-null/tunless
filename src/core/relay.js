@@ -11,6 +11,7 @@
 
 import net from "node:net";
 import { queryA } from "./dns.js";
+import { loadRules, matchHostRules, matchIpRules } from "./rules.js";
 
 const CRLF = "\r\n";
 
@@ -33,6 +34,30 @@ export function decideRoute(host, { internalSuffixes = [] } = {}) {
   return internalSuffixes.some((suffix) => hostMatchesSuffix(host, suffix))
     ? "internal"
     : "upstream";
+}
+
+/**
+ * 路由决策：先看自动扫描出来的后缀，再看用户手写的域名/关键词规则。
+ * 用户规则优先，因为它存在的意义就是「自动没覆盖到」。
+ */
+export function decideRouteWithRules(host, { internalSuffixes = [], rules = null } = {}) {
+  if (rules && matchHostRules(host, rules)) return "internal";
+  return decideRoute(host, { internalSuffixes });
+}
+
+/**
+ * 域名没命中任何规则、但解析出的 IP 落在用户填的网段里时，也算内网。
+ * 这需要一次 DNS 查询，所以只在准备连上游之前做（失败就当公网）。
+ */
+export async function routeByIpRules(host, rules, internalDns, timeout = 1500) {
+  if (!rules?.cidr?.length || !internalDns) return null;
+  const res = await queryA(host, internalDns, { timeout });
+  if (!res.ok || !res.ips.length) return null;
+  for (const ip of res.ips) {
+    const hit = matchIpRules(ip, rules);
+    if (hit) return { ip, rule: hit };
+  }
+  return null;
 }
 
 export function splitHostPort(target, defaultPort) {
@@ -155,6 +180,7 @@ export class HttpProxyServer {
     upstream = { host: "127.0.0.1", port: 7897 },
     internalDns = null,
     internalSuffixes = [],
+    rules = null,
     log = () => {},
   } = {}) {
     this.port = port;
@@ -162,6 +188,7 @@ export class HttpProxyServer {
     this.upstream = upstream;
     this.internalDns = internalDns;
     this.internalSuffixes = internalSuffixes;
+    this.rules = rules;
     this.log = log;
     this.server = null;
   }
@@ -195,7 +222,14 @@ export class HttpProxyServer {
 
   async handleConnect(socket, head, rest) {
     const { host, port } = splitHostPort(head.target, 443);
-    const route = decideRoute(host, { internalSuffixes: this.internalSuffixes });
+    let route = decideRouteWithRules(host, {
+      internalSuffixes: this.internalSuffixes,
+      rules: this.rules,
+    });
+    if (route === "upstream") {
+      const byIp = await routeByIpRules(host, this.rules, this.internalDns);
+      if (byIp) route = "internal";
+    }
     this.log(`CONNECT ${host}:${port} -> ${route}`);
 
     if (route === "internal") {
@@ -210,7 +244,10 @@ export class HttpProxyServer {
         socket.pipe(direct);
         direct.pipe(socket);
       });
-      direct.on("error", () => socket.destroy());
+      direct.on("error", (err) => {
+        this.log(`CONNECT ${host}:${port} 直连失败：${err.message}`);
+        socket.destroy();
+      });
       socket.on("error", () => direct.destroy());
       return;
     }
@@ -230,7 +267,10 @@ export class HttpProxyServer {
         upstreamSocket.pipe(socket);
       });
     });
-    upstreamSocket.on("error", () => socket.destroy());
+    upstreamSocket.on("error", (err) => {
+      this.log(`CONNECT ${host}:${port} 上游失败：${err.message}`);
+      socket.destroy();
+    });
     socket.on("error", () => upstreamSocket.destroy());
   }
 
@@ -248,7 +288,14 @@ export class HttpProxyServer {
     }
     const host = url.hostname;
     const port = Number(url.port || 80);
-    const route = decideRoute(host, { internalSuffixes: this.internalSuffixes });
+    let route = decideRouteWithRules(host, {
+      internalSuffixes: this.internalSuffixes,
+      rules: this.rules,
+    });
+    if (route === "upstream") {
+      const byIp = await routeByIpRules(host, this.rules, this.internalDns);
+      if (byIp) route = "internal";
+    }
     this.log(`GET ${host}:${port} -> ${route}`);
 
     if (route === "upstream") {
@@ -262,7 +309,10 @@ export class HttpProxyServer {
         socket.pipe(upstreamSocket);
         upstreamSocket.pipe(socket);
       });
-      upstreamSocket.on("error", () => socket.destroy());
+      upstreamSocket.on("error", (err) => {
+        this.log(`GET ${host}:${port} 上游失败：${err.message}`);
+        socket.destroy();
+      });
       socket.on("error", () => upstreamSocket.destroy());
       return;
     }
@@ -296,6 +346,7 @@ export class Socks5Server {
     upstream = { host: "127.0.0.1", port: 7897 },
     internalDns = null,
     internalSuffixes = [],
+    rules = null,
     log = () => {},
   } = {}) {
     this.port = port;
@@ -303,6 +354,7 @@ export class Socks5Server {
     this.upstream = upstream;
     this.internalDns = internalDns;
     this.internalSuffixes = internalSuffixes;
+    this.rules = rules;
     this.log = log;
     this.server = null;
   }
@@ -335,7 +387,14 @@ export class Socks5Server {
       return socket.destroy();
     }
     const { host, port } = await readAddress(socket, header[3]);
-    const route = decideRoute(host, { internalSuffixes: this.internalSuffixes });
+    let route = decideRouteWithRules(host, {
+      internalSuffixes: this.internalSuffixes,
+      rules: this.rules,
+    });
+    if (route === "upstream") {
+      const byIp = await routeByIpRules(host, this.rules, this.internalDns);
+      if (byIp) route = "internal";
+    }
     this.log(`SOCKS5 CONNECT ${host}:${port} -> ${route}`);
 
     let upstreamSocket;

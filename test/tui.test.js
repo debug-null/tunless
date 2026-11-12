@@ -11,7 +11,8 @@ import {
   center,
   charWidth,
 } from "../src/tui/width.js";
-import { OverviewPanel, DomainsPanel, ProcessesPanel, EventsPanel } from "../src/tui/panels.js";
+import { OverviewPanel } from "../src/tui/panels.js";
+import { RulesPanel, MorePanel } from "../src/tui/rules-panel.js";
 import { Card, kv, txt, ThemeProvider } from "../src/tui/ui.js";
 import { getTheme, detectUnicode, symbolSet, borderSet } from "../src/tui/theme.js";
 import { splitGraphemes } from "../src/tui/width.js";
@@ -128,41 +129,41 @@ test("键值行的值按显示宽度对齐（中文标题不错位）", async ()
   assert.equal(new Set(starts).size, 1, `值列起点不一致：${starts.join(",")}`);
 });
 
-test("域名表格列对齐且中文不错位", async () => {
+test("规则面板显示自动扫描结果与手动规则", async () => {
+  const state = {
+    ...baseState,
+    rules: { domain: ["17usoft.com"], keyword: ["jira"], cidr: ["10.0.0.0/8"] },
+  };
   const text = await shot(
-    h(Box, { flexDirection: "column", width: 120 }, h(DomainsPanel, { state: baseState, width: 120, height: 20, scroll: 0, query: "" })),
+    h(Box, { flexDirection: "column", width: 120 }, h(RulesPanel, { state, width: 120, height: 24, scroll: 0 })),
   );
-  const rows = text.split("\n").filter((line) => /17usoft\.com|17u\.cn/.test(line));
-  assert.equal(rows.length, 2);
-  const columnOf = (line, needle) => displayWidth(line.slice(0, line.indexOf(needle)));
-  const ipColumn = rows.map((line) => columnOf(line, line.match(/\d+\.\d+\.\d+\.\d+/)[0]));
-  assert.equal(ipColumn[0], ipColumn[1], "解析地址列没有对齐");
-  const judgeColumn = rows.map((line) => columnOf(line, "私网"));
-  assert.equal(judgeColumn[0], judgeColumn[1], "判定列没有对齐");
+  assert.match(text, /自动扫描到的内网域名/);
+  assert.match(text, /17usoft\.com/);
+  assert.match(text, /jira/);
+  assert.match(text, /10\.0\.0\.0\/8/);
+  assert.match(text, /不需要任何授权/);
 });
 
-test("搜索过滤只保留匹配的域名", async () => {
+test("规则输入状态显示当前类型与提示", async () => {
   const text = await shot(
-    h(Box, { flexDirection: "column", width: 120 }, h(DomainsPanel, { state: baseState, width: 120, height: 20, scroll: 0, query: "wiki" })),
+    h(
+      Box,
+      { flexDirection: "column", width: 120 },
+      h(RulesPanel, { state: baseState, width: 120, height: 20, editing: "cidr", draft: "10.0.0" }),
+    ),
   );
-  assert.match(text, /wiki\.17u\.cn/);
-  assert.doesNotMatch(text, /matrix\.17usoft\.com/);
+  assert.match(text, /10\.0\.0/);
+  assert.match(text, /IP 段/);
+  assert.match(text, /回车保存/);
 });
 
-test("程序面板渲染代理能力判定", async () => {
+test("更多面板收纳程序代理能力与分流后缀", async () => {
   const text = await shot(
-    h(Box, { flexDirection: "column", width: 120 }, h(ProcessesPanel, { state: baseState, height: 20, scroll: 0 })),
+    h(Box, { flexDirection: "column", width: 120 }, h(MorePanel, { state: baseState, width: 120 })),
   );
+  assert.match(text, /程序代理能力/);
   assert.match(text, /antigravity/);
-  assert.match(text, /支持/);
-});
-
-test("日志面板渲染带时间的记录", async () => {
-  const text = await shot(
-    h(Box, { flexDirection: "column", width: 120 }, h(EventsPanel, { events: [{ time: "12:00:00", text: "状态已更新", kind: "ok" }] })),
-  );
-  assert.match(text, /12:00:00/);
-  assert.match(text, /状态已更新/);
+  assert.match(text, /分流后缀/);
 });
 
 test("emoji 组合序列按一个字素簇计算宽度", () => {

@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   decideRoute,
+  decideRouteWithRules,
   hostMatchesSuffix,
   splitHostPort,
   normalizeHost,
@@ -41,4 +42,17 @@ test("splitHostPort parses host:port, bracketed IPv6 and defaults", () => {
 test("normalizeHost lowercases and strips wildcard/root dots", () => {
   assert.equal(normalizeHost("Matrix.17usoft.com."), "matrix.17usoft.com");
   assert.equal(normalizeHost("*.example.com"), "example.com");
+});
+
+test("用户手写的域名规则优先于自动扫描的后缀", () => {
+  const rules = { domain: ["example.com"], keyword: ["jira"], cidr: [] };
+  assert.equal(decideRouteWithRules("matrix.example.com", { internalSuffixes: [], rules }), "internal");
+  assert.equal(decideRouteWithRules("jira.corp.com", { internalSuffixes: [], rules }), "internal");
+  assert.equal(decideRouteWithRules("github.com", { internalSuffixes: [], rules }), "upstream");
+});
+
+test("没有规则时行为与原来一致", () => {
+  assert.equal(decideRouteWithRules("matrix.17usoft.com", { internalSuffixes: suffixes }), "internal");
+  assert.equal(decideRouteWithRules("github.com", { internalSuffixes: suffixes }), "upstream");
+  assert.equal(decideRouteWithRules("github.com", { internalSuffixes: suffixes, rules: null }), "upstream");
 });

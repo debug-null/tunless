@@ -23,27 +23,87 @@ tunless 把这两件事分开：
 
 一句话：**让那些「不读系统代理、只能靠 TUN 才能联网」的 Agent 工具，不用开 TUN 也能联网。**
 
-典型例子是 **Antigravity**（VS Code 系 AI 编辑器）和各类 CLI Agent。它们要么只认 `HTTPS_PROXY`，
-要么完全忽略代理设置。后一种过去只能靠 TUN，但 TUN 会把内网域名也劫持走。打开 tunless 的界面，
-它会告诉你当前机器上哪些程序能走代理、哪些必须靠转发，以及该按哪个键处理。
+典型例子是 **Cursor**、**Antigravity**（VS Code 系 AI 编辑器）和各类 CLI Agent。它们要么只认 `HTTPS_PROXY`，
+要么像 Cursor 这样把网络拆成好几条互不相通的路，过去只能靠 TUN；但 TUN 会把内网域名也劫持走。
+
+打开 tunless，它只告诉你**现在该按哪一个键**，不列一堆指标。
 
 ## 30 秒上手
 
-界面里按 `2` 或 `h` 可以随时看到这一页。命令行等价物：
-
 ```bash
-tunless doctor             # 1. 先诊断，看当前有什么问题
-tunless service install    # 2. 安装并启动转发服务（开机自启，监听 127.0.0.1:8899）
-tunless launch Antigravity # 3. 用这个代理重启 Antigravity
+tunless                    # 打开界面，上面就写着下一步按什么键
 ```
 
-第 3 步等价于给应用加上这两个环境变量后再启动它：
+界面上只有三件事：
+
+| 按键 | 作用 |
+|---|---|
+| `s` | 开关转发服务（第一次按会装成开机自启） |
+| `l` | 用代理重启应用，每按一次换一个（Antigravity → Cursor） |
+| `L` | Cursor 专用：改设置 + 重启（模型连不上就用这个） |
+| `a` | **手写一条内网域名 / 关键词 / IP 段**，不需要任何系统授权 |
+
+命令行等价物：
 
 ```bash
-HTTPS_PROXY=http://127.0.0.1:8899 HTTP_PROXY=http://127.0.0.1:8899 Antigravity
+tunless doctor             # 诊断，不改任何东西
+tunless service install    # 安装并启动转发服务（开机自启，监听 127.0.0.1:8899）
+tunless launch Cursor      # 带代理重启 Cursor
+tunless cursor             # Cursor 专用：写好 http.proxy 再重启（推荐）
+tunless rules add 10.0.0.0/8   # 手动补内网网段
 ```
 
-不想用 `tunless launch` 的话，在应用自己的代理设置里填 **协议 HTTP、地址 127.0.0.1、端口 8899** 即可。
+`tunless launch` 等价于给应用加上这两个环境变量后再启动它：
+
+```bash
+HTTPS_PROXY=http://127.0.0.1:8899 HTTP_PROXY=http://127.0.0.1:8899 Cursor
+```
+
+不想用它的话，在应用自己的代理设置里填 **协议 HTTP、地址 127.0.0.1、端口 8899** 即可。
+
+## Cursor 为什么会「连不上模型」
+
+Cursor 不是一个程序，是好几条互不相通的网络通路（这一点 Cursor 官方论坛有明确回复）：
+
+- **Chromium 部分**读 `http.proxy` 设置
+- **Agent 部分**走自己的 Node 传输层，读的是环境变量
+- **3.28 之前**，Agent 的 HTTP/2 连接**完全绕过**代理，只能靠 TUN；
+  3.28 起才改成「在代理里开 CONNECT 隧道，隧道内继续用 HTTP/2」
+
+所以只设环境变量、或者只改设置，都会只通一半。`tunless cursor` 三件事一起做：
+
+```bash
+tunless cursor
+```
+
+1. 往 `~/Library/Application Support/Cursor/User/settings.json` 写
+   `http.proxy` = `http://127.0.0.1:8899`、`http.proxySupport` = `override`
+2. 按版本决定要不要加 `cursor.general.disableHttp2`（3.28+ 不需要，更早的必须关）
+3. **完全退出** Cursor 再带代理环境重启 —— Cursor 经常忽略 AppleScript 的退出请求，
+   tunless 会逐级升级到 SIGTERM/SIGKILL，否则 `open` 会变成「应用已在运行，环境变量没生效」
+
+写入前会自动备份到 `~/.tunless/backups/`，写坏会中止而不是硬写。
+
+## 内网域名扫不到？自己写一条
+
+自动扫描只看本机历史记录，还要读 Chrome 历史（需要「完全磁盘访问权限」）。
+很多人不愿意给这个权限，所以 tunless 提供了一条完全不需要授权的路：
+
+```bash
+tunless rules add 17usoft.com      # 域名后缀，子域名自动覆盖
+tunless rules add jira --keyword   # 域名里含这个词就走直连
+tunless rules add 10.0.0.0/8       # 解析到这个网段就走直连
+tunless rules list                 # 看当前所有规则
+tunless rules remove 17usoft.com   # 删掉
+```
+
+界面里按 `a` 就能直接输入，`Tab` 在「域名 / 关键词 / IP 段」之间切换，`d` 删除选中的规则。
+
+规则存在 `~/.tunless/rules.json`，转发服务每次启动时读取 —— 改完重启服务生效：
+
+```bash
+tunless service uninstall && tunless service install
+```
 
 停止转发服务用 `tunless service stop`，查看状态用 `tunless service status`，看日志用 `tunless service logs`。
 

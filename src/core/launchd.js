@@ -57,6 +57,29 @@ async function launchctl(args, { ignoreFailure = false } = {}) {
   }
 }
 
+/**
+ * bootout 之后 launchd 需要一点时间注销任务，紧接着 bootstrap 会报
+ * "Bootstrap failed: 5: Input/output error"。重试几次即可，不必让用户重来。
+ */
+async function bootstrapWithRetry({ attempts = 15, delayMs = 600 } = {}) {
+  let lastError = null;
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      await exec("launchctl", ["bootstrap", guiDomain(), PLIST_PATH], { timeout: 15000 });
+      return;
+    } catch (err) {
+      lastError = err;
+      const message = String(err.stderr || err.message || "");
+      // 已经注册过（服务还在跑）不算失败
+      if (/already bootstrapped|service already loaded/i.test(message)) return;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw new Error(
+    `launchctl bootstrap 失败：${lastError?.stderr || lastError?.message || "未知错误"}`,
+  );
+}
+
 export async function installService({ args = [], logDir = LOG_DIR } = {}) {
   fs.mkdirSync(logDir, { recursive: true });
   fs.mkdirSync(AGENT_DIR, { recursive: true });
@@ -74,7 +97,7 @@ export async function installService({ args = [], logDir = LOG_DIR } = {}) {
   fs.writeFileSync(PLIST_PATH, xml, "utf8");
 
   await launchctl(["bootout", `${guiDomain()}/${LABEL}`], { ignoreFailure: true });
-  await launchctl(["bootstrap", guiDomain(), PLIST_PATH]);
+  await bootstrapWithRetry();
   await launchctl(["enable", `${guiDomain()}/${LABEL}`], { ignoreFailure: true });
   await launchctl(["kickstart", "-k", `${guiDomain()}/${LABEL}`], { ignoreFailure: true });
   return { plist: PLIST_PATH };
@@ -95,7 +118,8 @@ export async function startService({ port = 8899, timeoutMs = 10000 } = {}) {
   if (!fs.existsSync(PLIST_PATH)) {
     throw new Error("转发服务还没安装，请先运行 tunless service install");
   }
-  await launchctl(["bootstrap", guiDomain(), PLIST_PATH], { ignoreFailure: true });
+  // 已注册时 bootstrap 会失败，这是正常情况，所以允许失败
+  await bootstrapWithRetry({ attempts: 2, delayMs: 200 }).catch(() => {});
   await launchctl(["enable", `${guiDomain()}/${LABEL}`], { ignoreFailure: true });
   await launchctl(["kickstart", "-k", `${guiDomain()}/${LABEL}`]);
   // launchd 拉起进程需要几百毫秒到几秒，端口没起来就刷新界面会显示「未运行」。

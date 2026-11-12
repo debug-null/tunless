@@ -20,12 +20,25 @@ import {
 } from "./core/plan.js";
 import { dumpYaml } from "./core/yaml.js";
 import { HttpProxyServer, Socks5Server } from "./core/relay.js";
+import { loadRules, ruleSuffixes } from "./core/rules.js";
 import {
   installService,
   uninstallService,
   serviceStatus,
   readServiceLog,
 } from "./core/launchd.js";
+import {
+  findApp,
+  cursorVersion,
+  readCursorSettings,
+  cursorProxyState,
+  planCursorSettings,
+  applyCursorSettingsText,
+  stripJsonc,
+  backupFile,
+  quitApp,
+  openApp,
+} from "./core/apps.js";
 import { VergeAdapter } from "./adapters/verge.js";
 import { GenericAdapter } from "./adapters/generic.js";
 
@@ -341,10 +354,16 @@ export async function cmdProxy(args) {
   const repoRoots = args.flags.repos
     ? String(args.flags.repos).split(",").map((s) => s.trim()).filter(Boolean)
     : [];
-  const suffixes = await collectInternalSuffixes(frontend, internalDns, {
-    scan: args.flags["no-scan"] !== true,
-    repoRoots,
-  });
+  const rules = loadRules();
+  const suffixes = [
+    ...new Set([
+      ...(await collectInternalSuffixes(frontend, internalDns, {
+        scan: args.flags["no-scan"] !== true,
+        repoRoots,
+      })),
+      ...ruleSuffixes(rules),
+    ]),
+  ].sort();
 
   say(head("\n── tunless proxy ──\n"));
   say(`  ${info(`上游内核：${upstream.host}:${upstream.port}${coreVersion ? `（mihomo ${coreVersion}）` : ""}`)}`);
@@ -371,6 +390,7 @@ export async function cmdProxy(args) {
     upstream,
     internalDns,
     internalSuffixes: suffixes,
+    rules,
     log,
   });
   await httpServer.start();
@@ -382,6 +402,7 @@ export async function cmdProxy(args) {
       upstream,
       internalDns,
       internalSuffixes: suffixes,
+      rules,
       log,
     });
     await socksServer.start();
@@ -417,10 +438,15 @@ export async function cmdLaunch(args) {
   const repoRoots = args.flags.repos
     ? String(args.flags.repos).split(",").map((s) => s.trim()).filter(Boolean)
     : [];
-  const suffixes = await collectInternalSuffixes(frontend, internalDns, {
-    scan: args.flags["no-scan"] !== true,
-    repoRoots,
-  });
+  const suffixes = [
+    ...new Set([
+      ...(await collectInternalSuffixes(frontend, internalDns, {
+        scan: args.flags["no-scan"] !== true,
+        repoRoots,
+      })),
+      ...ruleSuffixes(loadRules()),
+    ]),
+  ].sort();
   const noProxyList = ["127.0.0.1", "localhost", "::1", ".local", ...suffixes]
     .filter(Boolean)
     .join(",");
@@ -448,21 +474,146 @@ export async function cmdLaunch(args) {
     return 0;
   }
 
-  // Quit any running instance first so the new environment takes effect.
-  const appName = app.replace(/\.app$/, "");
-  try {
-    await exec("osascript", ["-e", `quit app "${appName}"`], { timeout: 10000 });
-  } catch {
-    // not running
+  // Cursor 的 Agent 有独立的传输层，光给环境变量不够，还得写 settings.json。
+  const target = findApp(app);
+  if (target?.kind === "cursor") {
+    const result = await configureCursor({ proxyUrl: `http://127.0.0.1:${httpPort}`, yes: true, quiet: false });
+    if (!result.ok) return 1;
   }
-  await new Promise((r) => setTimeout(r, 2500));
 
-  const openArgs = ["-a", appName];
-  for (const [key, value] of Object.entries(env)) {
-    openArgs.push("--env", `${key}=${value}`);
+  const quitResult = await quitApp({ bundle: app.replace(/\.app$/, "") });
+  if (!quitResult.quit) {
+    say(`  ${warn(`${app} 没能完全退出（pid ${quitResult.pid}），环境变量无法生效`)}`);
+    say(dim("    请手动 Cmd+Q 退出后再运行这条命令"));
+    return 1;
   }
-  await exec("open", openArgs, { timeout: 15000 });
-  say(`\n  ${ok(`已使用 tunless 代理启动 ${appName}`)}\n`);
+  if (quitResult.escalated) {
+    say(dim(`    注意：${app} 忽略了正常退出请求，已强制关闭以便带代理重启`));
+  }
+  await new Promise((r) => setTimeout(r, target?.kind === "cursor" ? 2000 : 800));
+  await openApp({ bundle: app.replace(/\.app$/, "") }, env);
+  say(`\n  ${ok(`已使用 tunless 代理启动 ${app.replace(/\.app$/, "")}`)}\n`);
+  return 0;
+}
+
+/**
+ * Cursor 专用：把代理写进 settings.json。
+ *
+ * 只修这个不修那个是没用的 —— Cursor 的 Chromium 部分读 http.proxy，
+ * Agent 的 Node 传输层读环境变量；3.28 之前 HTTP/2 通路还会完全绕过代理。
+ */
+export async function configureCursor({ proxyUrl, yes = false, quiet = false } = {}) {
+  const settings = readCursorSettings();
+  const version = cursorVersion();
+  const current = cursorProxyState(settings);
+  const { changes, warnings } = planCursorSettings({ proxyUrl, version });
+
+  if (!settings.exists) {
+    say(`  ${warn(`没找到 Cursor 配置：${settings.file}`)}`);
+    say(dim("    先打开一次 Cursor，让它生成配置再运行这条命令"));
+    return { ok: false };
+  }
+  if (settings.parseError) {
+    say(`  ${warn(`Cursor 配置无法解析：${settings.parseError}`)}`);
+    say(dim("    为避免写坏配置，这里不做修改"));
+    return { ok: false };
+  }
+
+  const diff = [];
+  for (const [key, value] of Object.entries(changes)) {
+    const before = settings.data[key];
+    if (before !== value) diff.push({ key, before, after: value });
+  }
+
+  if (!quiet) {
+    say(head("\n── Cursor 代理配置 ──\n"));
+    say(`  ${info(`版本：${version ?? "未知"}`)}`);
+    say(`  ${info(`配置文件：${settings.file}`)}`);
+    if (current.proxySupport && current.proxySupport !== "override") {
+      say(`  ${warn(`http.proxySupport 目前是 ${current.proxySupport}，会被改成 override`)}`);
+    }
+  }
+
+  for (const warning of warnings) say(`  ${warn(warning)}`);
+
+  if (!diff.length) {
+    say(`  ${ok("代理设置已经就绪，无需改动")}`);
+    return { ok: true, changed: false };
+  }
+
+  if (!quiet) {
+    say(head(`\n  将要修改（${diff.length} 项）：`));
+    for (const d of diff) {
+      say(`    ${d.key}`);
+      say(dim(`      现在：${d.before === undefined ? "（未设置）" : JSON.stringify(d.before)}`));
+      say(`      改为：${JSON.stringify(d.after)}`);
+    }
+  }
+
+  if (!yes) {
+    const answer = await prompt("\n  确认写入 Cursor 配置？[y/N] ");
+    if (!/^y(es)?$/i.test(answer.trim())) {
+      say(`\n  ${warn("已取消 — 未写入任何内容")}\n`);
+      return { ok: false, changed: false };
+    }
+  }
+
+  const backup = backupFile(settings.file);
+  say(`\n  ${info(`已备份：${backup}`)}`);
+  const next = applyCursorSettingsText(settings.raw, changes);
+  try {
+    JSON.parse(stripJsonc(next));
+  } catch (err) {
+    say(`  ${bad(`生成的配置不合法，已中止：${err.message}`)}`);
+    return { ok: false };
+  }
+  fs.writeFileSync(settings.file, next, "utf8");
+  say(`  ${ok("Cursor 配置已更新")}`);
+  return { ok: true, changed: true };
+}
+
+export async function cmdCursor(args) {
+  const httpPort = Number(args.flags.port || 8899);
+  const result = await configureCursor({
+    proxyUrl: `http://127.0.0.1:${httpPort}`,
+    yes: args.flags.yes === true || args.flags.y === true,
+  });
+  if (!result.ok) return 1;
+
+  if (args.flags["no-restart"] === true) return 0;
+
+  const internalDns = args.flags["internal-dns"] || DEFAULT_INTERNAL_DNS;
+  const frontend = await pickFrontend(args);
+  const suffixes = [
+    ...new Set([
+      ...(await collectInternalSuffixes(frontend, internalDns, { scan: false })),
+      ...ruleSuffixes(loadRules()),
+    ]),
+  ].sort();
+  const noProxyList = ["127.0.0.1", "localhost", "::1", ".local", ...suffixes].join(",");
+  const env = {
+    HTTPS_PROXY: `http://127.0.0.1:${httpPort}`,
+    HTTP_PROXY: `http://127.0.0.1:${httpPort}`,
+    https_proxy: `http://127.0.0.1:${httpPort}`,
+    http_proxy: `http://127.0.0.1:${httpPort}`,
+    NO_PROXY: noProxyList,
+    no_proxy: noProxyList,
+  };
+
+  say(`\n  ${info("正在完全退出 Cursor，让设置生效…")}`);
+  const quitResult = await quitApp(findApp("cursor"));
+  if (!quitResult.quit) {
+    say(`  ${warn(`Cursor 没能退出（pid ${quitResult.pid}），请手动 Cmd+Q 后再试`)}`);
+    say(dim("    settings.json 已经写好，重新打开 Cursor 即可生效\n"));
+    return 1;
+  }
+  if (quitResult.escalated) {
+    say(dim("    注意：Cursor 忽略了正常退出，已强制关闭（VS Code 会恢复未保存的编辑）"));
+  }
+  await new Promise((r) => setTimeout(r, 2000));
+  await openApp(findApp("cursor"), env);
+  say(`  ${ok("Cursor 已带着代理重新启动")}`);
+  say(dim("  验证方式：在 Cursor 里发一条消息，模型能回就说明通了\n"));
   return 0;
 }
 
@@ -695,6 +846,8 @@ ${head("用法")}
   tunless fix [选项]          生成方案 → 预览差异 → 确认 → 应用 → 校验
   tunless proxy [选项]        启动本地转发代理，把代理能力交给工具
   tunless launch [应用]       带代理环境重启某个应用
+  tunless cursor              给 Cursor 配好代理并带代理重启（专治模型连不上）
+  tunless rules [操作]        add | remove | list — 手动补充内网域名/关键词/IP 段
   tunless service <操作>      install | uninstall | status | logs
 
 ${head("选项")}
@@ -718,6 +871,9 @@ ${head("示例")}
   tunless fix --yes
   tunless proxy
   tunless launch Antigravity
+  tunless cursor
+  tunless rules add '+.17usoft.com'
+  tunless rules add 10.0.0.0/8
 `;
 
 export async function main(argv) {
@@ -768,6 +924,18 @@ export async function main(argv) {
         return await cmdService(args);
       case "launch":
         return await cmdLaunch(args);
+      case "cursor":
+        return await cmdCursor(args);
+      case "rules": {
+        const { cmdRules } = await import("./cli-rules.js");
+        return await cmdRules(args, {
+          say: (line = "") => say(line),
+          ok,
+          warn,
+          info,
+          dim,
+        });
+      }
       default:
         console.error(`未知命令：${cmd}`);
         say(HELP);

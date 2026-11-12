@@ -10,29 +10,24 @@ import { render, renderToString, Box, Text, useApp, useInput, useStdout } from "
 import { h, ThemeProvider, Tabs, useTheme } from "./ui.js";
 import { getTheme, detectUnicode } from "./theme.js";
 import { queryTerminalColorScheme, themeFromEnv } from "./terminal-theme.js";
-import {
-  PANELS,
-  OverviewPanel,
-  DomainsPanel,
-  ProcessesPanel,
-  RoutesPanel,
-  EventsPanel,
-} from "./panels.js";
+import { PANELS, OverviewPanel } from "./panels.js";
 import { HelpPanel } from "./help.js";
+import { RulesPanel, MorePanel } from "./rules-panel.js";
+import { addRule, removeRule, saveRules, loadRules, RULE_KINDS } from "../core/rules.js";
 import { isFirstRun, markSeen } from "./first-run.js";
 import { collectState, emptyState } from "./state.js";
 import { startService, stopService } from "../core/launchd.js";
 const PANEL_COMPONENTS = {
   overview: OverviewPanel,
-  domains: DomainsPanel,
-  processes: ProcessesPanel,
-  routes: RoutesPanel,
-  events: EventsPanel,
+  rules: RulesPanel,
+  more: MorePanel,
   help: HelpPanel,
 };
 
-const DEFAULT_HINT =
-  "← → 切换面板 · r 刷新 · f 修复 · s 服务 · l 重启应用 · / 过滤 · 2 用法 · q 退出";
+const DEFAULT_HINT = "← → 换页 · s 开关转发服务 · a 加内网域名 · f 修 DNS · q 退出";
+
+/** 按 l 能依次启动的应用；这些是实际验证过「靠环境变量/配置能走代理」的 */
+const APP_CHOICES = ["Antigravity", "Cursor"];
 
 export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const { exit } = useApp();
@@ -49,6 +44,11 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const [scroll, setScroll] = useState(0);
   const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState("");
+  // 手动加规则：editing 存规则类型（domain/keyword/cidr），null 表示没在输入
+  const [editing, setEditing] = useState(null);
+  const [draft, setDraft] = useState("");
+  const [ruleIndex, setRuleIndex] = useState(0);
+  const [appChoice, setAppChoice] = useState(0);
 
   const log = useCallback((text, kind = "info") => {
     const time = new Date().toLocaleTimeString("zh-CN", { hour12: false });
@@ -142,8 +142,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     await refresh();
   }, [state.sidecar.running, state.sidecar.installed, log, refresh]);
 
-  const runLaunch = useCallback(async () => {
-    const app = "Antigravity";
+  const launchApp = useCallback(async (app) => {
     log(`正在以 tunless 代理重启 ${app}…`, "info");
     const { cmdLaunch, setQuiet } = await import("../cli.js");
     setQuiet(true);
@@ -159,8 +158,56 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       { quiet: true },
     );
     log(`${app} 已重启`, "ok");
+    setHint(
+      app === "Cursor"
+        ? "Cursor 已带代理启动，发一条消息试试模型能不能回"
+        : `${app} 已带代理启动`,
+    );
     await refresh();
   }, [internalDns, includeChrome, log, refresh]);
+
+  /** 按 l 依次在受支持的应用之间切换，避免用户不知道能启动哪个 */
+  const runLaunch = useCallback(async () => {
+    const app = APP_CHOICES[appChoice % APP_CHOICES.length];
+    setAppChoice((i) => i + 1);
+    await launchApp(app);
+  }, [appChoice, launchApp]);
+
+  /** Cursor 专用：改 settings.json + 关 HTTP/2 + 带代理重启 */
+  const runCursor = useCallback(async () => {
+    log("正在配置 Cursor 代理…", "info");
+    const { configureCursor, setQuiet } = await import("../cli.js");
+    setQuiet(true);
+    const { quitApp, openApp, findApp } = await import("../core/apps.js");
+    const result = await configureCursor({
+      proxyUrl: "http://127.0.0.1:8899",
+      yes: true,
+      quiet: true,
+    });
+    if (!result.ok) {
+      log("Cursor 配置失败", "bad");
+      setHint("Cursor 配置失败：先打开一次 Cursor 生成配置");
+      return;
+    }
+    const app = findApp("cursor");
+    const quitResult = await quitApp(app);
+    if (!quitResult.quit) {
+      log(`Cursor 没能退出（pid ${quitResult.pid}）`, "bad");
+      setHint("Cursor 没能退出，请手动 Cmd+Q 后再按 L（配置已写好）");
+      return;
+    }
+    if (quitResult.escalated) log("Cursor 忽略正常退出，已强制关闭", "warn");
+    await new Promise((r) => setTimeout(r, 2000));
+    await openApp(app, {
+      HTTPS_PROXY: "http://127.0.0.1:8899",
+      HTTP_PROXY: "http://127.0.0.1:8899",
+      https_proxy: "http://127.0.0.1:8899",
+      http_proxy: "http://127.0.0.1:8899",
+    });
+    log("Cursor 已配置并带着代理重启", "ok");
+    setHint("Cursor 已带代理重启，发一条消息试试模型能不能回");
+    await refresh();
+  }, [log, refresh]);
 
   const runAction = useCallback(
     async (name) => {
@@ -176,12 +223,13 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         else if (name === "proxy") await runProxy();
         else if (name === "service") await runService();
         else if (name === "launch") await runLaunch();
+        else if (name === "cursor") await runCursor();
       } catch (err) {
         log(`操作失败：${err.message}`, "bad");
       }
       setBusy(false);
     },
-    [busy, refresh, runFix, runProxy, runService, runLaunch, log],
+    [busy, refresh, runFix, runProxy, runService, runLaunch, runCursor, log],
   );
 
   // 首次进入自动采集一次。
@@ -213,7 +261,87 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     [panel, switchPanel],
   );
 
+  /** 规则面板里「按顺序能选到」的全部规则，供删除使用 */
+  const flatRules = useCallback(() => {
+    const rules = state.rules ?? { domain: [], keyword: [], cidr: [] };
+    return RULE_KINDS.flatMap((kind) => (rules[kind] ?? []).map((value) => ({ kind, value })));
+  }, [state.rules]);
+
+  const saveDraft = useCallback(() => {
+    const value = draft.trim();
+    if (!value) {
+      setEditing(null);
+      setDraft("");
+      return;
+    }
+    try {
+      const { rules, rule, added } = addRule(loadRules(), value, editing);
+      saveRules(rules);
+      setState((prev) => ({ ...prev, rules }));
+      log(
+        added ? `已添加内网规则：${rule.value}` : `规则已存在：${rule.value}`,
+        added ? "ok" : "warn",
+      );
+      setHint(
+        added
+          ? `已保存 ${rule.value} · 重启转发服务后生效（按 s 两次）`
+          : `${rule.value} 已经在规则里了`,
+      );
+    } catch (err) {
+      setHint(`保存失败：${err.message}`);
+      setEditing(editing);
+      return;
+    }
+    setEditing(null);
+    setDraft("");
+  }, [draft, editing, log]);
+
+  const deleteRule = useCallback(() => {
+    const list = flatRules();
+    if (!list.length) {
+      setHint("还没有手动规则可删");
+      return;
+    }
+    const target = list[ruleIndex % list.length];
+    try {
+      const { rules, removed } = removeRule(loadRules(), target.value, target.kind);
+      saveRules(rules);
+      setState((prev) => ({ ...prev, rules }));
+      log(removed ? `已删除规则：${target.value}` : `没有这条规则：${target.value}`, removed ? "warn" : "bad");
+      setHint(removed ? `已删除 ${target.value}` : `没有找到 ${target.value}`);
+      setRuleIndex(0);
+    } catch (err) {
+      setHint(`删除失败：${err.message}`);
+    }
+  }, [flatRules, ruleIndex, log]);
+
   useInput((input, key) => {
+    // 输入规则：所有按键都进输入框，Tab 在三种类型之间切换
+    if (editing) {
+      if (key.escape) {
+        setEditing(null);
+        setDraft("");
+        return;
+      }
+      if (key.return) {
+        saveDraft();
+        return;
+      }
+      if (key.tab) {
+        const index = RULE_KINDS.indexOf(editing);
+        setEditing(RULE_KINDS[(index + 1) % RULE_KINDS.length]);
+        return;
+      }
+      if (key.backspace || key.delete) {
+        setDraft((v) => v.slice(0, -1));
+        return;
+      }
+      if (input && !key.ctrl && !key.meta) {
+        setDraft((v) => v + input);
+      }
+      return;
+    }
+
     // 搜索模式：按键全部进入搜索框。
     if (searching) {
       if (key.escape) {
@@ -256,11 +384,20 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       return;
     }
     if (key.upArrow || input === "k") {
-      setScroll((s) => Math.max(0, s - 1));
+      if (panel === "rules") {
+        setRuleIndex((i) => Math.max(0, i - 1));
+      } else {
+        setScroll((s) => Math.max(0, s - 1));
+      }
       return;
     }
     if (key.downArrow || input === "j") {
-      setScroll((s) => s + 1);
+      if (panel === "rules") {
+        const total = RULE_KINDS.reduce((sum, kind) => sum + ((state.rules?.[kind] ?? []).length), 0);
+        setRuleIndex((i) => Math.min(Math.max(0, total - 1), i + 1));
+      } else {
+        setScroll((s) => s + 1);
+      }
       return;
     }
     if (key.pageUp) {
@@ -275,6 +412,17 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       setSearching(true);
       setQuery("");
       setScroll(0);
+      return;
+    }
+    // a：任何页面都能直接加内网规则。这是「不想授权也能用」的主入口。
+    if (input === "a") {
+      setEditing("domain");
+      setDraft("");
+      setHint("");
+      return;
+    }
+    if (input === "d" && panel === "rules") {
+      deleteRule();
       return;
     }
 
@@ -307,6 +455,9 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       case "l":
         runAction("launch");
         return;
+      case "L":
+        runAction("cursor");
+        return;
       default:
         break;
     }
@@ -324,6 +475,10 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     scroll,
     query,
     events,
+    editing,
+    draft,
+    ruleIndex,
+    appChoice,
   };
 
   const right = busy
@@ -348,7 +503,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       Box,
       { flexDirection: "row", justifyContent: "space-between" },
       h(Text, { color: theme.colors.accent, bold: true }, " tunless "),
-      h(Text, { dimColor: true }, "Agent 免 TUN 联网 · 不知道从哪开始就按 2 看用法"),
+      h(Text, { dimColor: true }, "Agent 免 TUN 联网 · 按 s 开服务，按 l 开应用，按 a 加内网域名"),
       right,
     ),
     h(Tabs, { items: PANELS, activeId: panel }),
@@ -397,7 +552,9 @@ export async function renderStaticSummary(options = {}) {
     includeChrome: options.includeChrome ?? false,
   });
 
-  const width = Math.min(process.stdout.columns || 100, 110);
+  // ink 在非 TTY 下按 80 列排版，这里必须用同一个宽度，
+  // 否则我们自己算的 100 列会和它的 80 列打架，并排卡片直接被折行。
+  const width = Math.min(process.stdout.columns || 80, 110);
   const head = renderToString(
     h(ThemeProvider, { theme, unicode }, h(OverviewPanel, { state, width })),
   );

@@ -8,6 +8,7 @@ import { scanAll } from "../core/scan.js";
 import { inspectProcesses } from "../core/proc.js";
 import { serviceStatus } from "../core/launchd.js";
 import { mergeHostsValidated, partitionByKind } from "../core/plan.js";
+import { loadRules, ruleSuffixes } from "../core/rules.js";
 import net from "node:net";
 
 const DEFAULT_INTERNAL_DNS = "10.249.150.130";
@@ -63,6 +64,7 @@ export function emptyState() {
     processes: [],
     notes: [],
     errors: [],
+    rules: { domain: [], keyword: [], cidr: [] },
     updatedAt: null,
   };
 }
@@ -75,6 +77,7 @@ export async function collectState({
 } = {}) {
   const state = emptyState();
   state.loading = true;
+  state.rules = loadRules();
   const notify = (stage) => {
     if (onProgress) {
       try {
@@ -155,6 +158,8 @@ export async function collectState({
       state.internalDomains.map((d) => d.name),
       { classify: (name) => classifyDomain(name, internalDns) },
     );
+    // 用户手写的域名规则同样要参与路由，界面里也要能看到它们生效了。
+    state.suffixes = [...new Set([...state.suffixes, ...ruleSuffixes(state.rules)])].sort();
   } catch (err) {
     state.errors.push(`域名扫描失败 — ${err.message}`);
   }

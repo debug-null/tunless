@@ -8,7 +8,7 @@ import { displayWidth } from "../src/tui/width.js";
 
 const h = React.createElement;
 
-test("下一步建议覆盖转发服务、程序与假 IP 三类问题", () => {
+test("一次只给一个下一步，避免用户不知道该按哪个", () => {
   const steps = nextSteps({
     core: { reachable: true },
     sidecar: { running: false, installed: false },
@@ -16,14 +16,31 @@ test("下一步建议覆盖转发服务、程序与假 IP 三类问题", () => {
     fakeCount: 2,
     internalDomains: [{ name: "a.17usoft.com" }],
   });
-  const text = steps.map((s) => s.text).join(" ");
-  assert.match(text, /还没装/);
-  assert.match(text, /somecli/);
-  assert.match(text, /假 IP/);
-  assert.ok(steps.every((s) => typeof s.text === "string" && s.text.length > 0));
+  // 没装服务时，最该做的是装服务，不该同时抛出一堆问题
+  assert.equal(steps.length, 1);
+  assert.equal(steps[0].key, "s");
+  assert.match(steps[0].text, /转发服务/);
 });
 
-test("转发服务已装且运行时建议用代理重启应用", () => {
+test("内核不可达时先解决内核", () => {
+  const steps = nextSteps({ core: { reachable: false }, sidecar: {}, processes: [], fakeCount: 0 });
+  assert.equal(steps.length, 1);
+  assert.match(steps[0].text, /内核/);
+});
+
+test("服务正常且有假 IP 时优先修 DNS", () => {
+  const steps = nextSteps({
+    core: { reachable: true },
+    sidecar: { running: true, installed: true },
+    processes: [],
+    fakeCount: 2,
+    internalDomains: [],
+  });
+  assert.equal(steps[0].key, "f");
+  assert.match(steps[0].text, /假 IP/);
+});
+
+test("转发服务已装且运行时建议用代理重启应用，并提示可手写域名", () => {
   const steps = nextSteps({
     core: { reachable: true },
     sidecar: { running: true, installed: true },
@@ -31,9 +48,9 @@ test("转发服务已装且运行时建议用代理重启应用", () => {
     fakeCount: 0,
     internalDomains: [],
   });
-  const first = steps[0];
-  assert.equal(first.key, "l");
-  assert.match(first.text, /Antigravity/);
+  assert.equal(steps[0].key, "l");
+  assert.match(steps[0].text, /Antigravity|Cursor/);
+  assert.ok(steps.some((s) => s.key === "a"), "应提示可以手写内网规则");
 });
 
 test("帮助面板讲清楚是什么、给谁用、代理填什么", () => {

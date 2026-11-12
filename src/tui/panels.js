@@ -8,12 +8,10 @@ import { symbolSet } from "./theme.js";
 import { nextSteps } from "./help.js";
 
 export const PANELS = [
-  { id: "overview", name: "总览", key: "1" },
-  { id: "help", name: "怎么用", key: "2" },
-  { id: "domains", name: "内网域名", key: "3" },
-  { id: "processes", name: "程序代理能力", key: "4" },
-  { id: "routes", name: "分流规则", key: "5" },
-  { id: "events", name: "操作日志", key: "6" },
+  { id: "overview", name: "开始", key: "1" },
+  { id: "rules", name: "内网规则", key: "2" },
+  { id: "more", name: "更多", key: "3" },
+  { id: "help", name: "怎么用", key: "4" },
 ];
 
 /** 计算表格列宽，保证中文标题和内容对齐 */
@@ -23,7 +21,7 @@ function columnsFor(width, ratio) {
   return { nameWidth, ipWidth };
 }
 
-export function OverviewPanel({ state, width }) {
+export function OverviewPanel({ state, width, appChoice = 0 }) {
   const theme = useTheme();
   const symbols = symbolSet(useUnicode());
 
@@ -132,7 +130,8 @@ export function OverviewPanel({ state, width }) {
   const coreCardRows = pad(coreRows);
   const sideCardRows = pad(sideRows);
 
-  const stepRows = nextSteps(state).map((step) => [
+  const nextApp = ["Antigravity", "Cursor"][appChoice % 2];
+  const stepRows = nextSteps(state, { nextApp }).map((step) => [
     txt("  "),
     step.key
       ? txt(`按 ${step.key}`, { color: theme.colors.accent, bold: true })
@@ -163,172 +162,3 @@ export function OverviewPanel({ state, width }) {
   );
 }
 
-export function DomainsPanel({ state, width, scroll, height, query }) {
-  const theme = useTheme();
-
-  if (state.loading) {
-    return h(Box, { flexDirection: "column" }, h(Text, { dimColor: true }, "  正在扫描并解析…"));
-  }
-
-  const all = state.internalDomains;
-  const rows = query
-    ? all.filter((d) => d.name.toLowerCase().includes(query.toLowerCase()))
-    : all;
-
-  if (!rows.length) {
-    return h(
-      Box,
-      { flexDirection: "column" },
-      h(
-        Text,
-        { dimColor: true },
-        query ? `  没有匹配「${query}」的域名` : "  未发现解析到私网地址的域名",
-      ),
-    );
-  }
-
-  const { nameWidth, ipWidth } = columnsFor(width, 0.5);
-  const header = h(
-    Text,
-    { dimColor: true },
-    `  ${padEnd("域名", nameWidth)}${padEnd("解析地址", ipWidth)}判定`,
-  );
-
-  const visible = Math.max(1, height - 2);
-  const start = Math.min(scroll, Math.max(0, rows.length - visible));
-  const slice = rows.slice(start, start + visible);
-
-  const body = slice.map((d) =>
-    h(
-      Text,
-      { key: d.name },
-      "  ",
-      h(Text, { color: theme.colors.text }, padEnd(truncate(d.name, nameWidth), nameWidth)),
-      h(Text, { color: theme.colors.info }, padEnd(truncate(d.ips.join(", "), ipWidth), ipWidth)),
-      h(Badge, { tone: "ok" }, "私网"),
-    ),
-  );
-
-  return h(
-    Box,
-    { flexDirection: "column" },
-    header,
-    ...body,
-    rows.length > slice.length || start > 0
-      ? h(Text, { dimColor: true }, `  显示 ${start + 1}-${start + slice.length} / ${rows.length}`)
-      : null,
-  );
-}
-
-export function ProcessesPanel({ state, scroll, height }) {
-  const theme = useTheme();
-
-  if (!state.processes.length) {
-    return h(Box, { flexDirection: "column" }, h(Text, { dimColor: true }, "  未发现相关进程"));
-  }
-
-  const nameWidth = 52;
-  const header = h(Text, { dimColor: true }, `  ${padEnd("程序", nameWidth)}代理能力`);
-
-  const visible = Math.max(1, height - 3);
-  const start = Math.min(scroll, Math.max(0, state.processes.length - visible));
-  const slice = state.processes.slice(start, start + visible);
-
-  const body = slice.map((p) => {
-    const tone = p.status === "supported" ? "ok" : p.status === "unsupported" ? "warn" : "muted";
-    const label = p.status === "supported" ? "支持" : p.status === "unsupported" ? "不支持" : "未知";
-    return h(
-      Text,
-      { key: `${p.pid}-${p.comm}` },
-      "  ",
-      h(Text, { color: theme.colors.text }, padEnd(truncate(p.comm, nameWidth - 1), nameWidth)),
-      h(Badge, { tone }, label),
-    );
-  });
-
-  return h(
-    Box,
-    { flexDirection: "column" },
-    h(
-      Text,
-      { dimColor: true },
-      "  检测运行中的程序是否支持 HTTPS_PROXY 环境变量（Go 的 httpproxy 符号）",
-    ),
-    "",
-    header,
-    ...body,
-    state.processes.length > slice.length || start > 0
-      ? h(
-          Text,
-          { dimColor: true },
-          `  显示 ${start + 1}-${start + slice.length} / ${state.processes.length}`,
-        )
-      : null,
-  );
-}
-
-export function RoutesPanel({ state }) {
-  const theme = useTheme();
-
-  const suffixRows = state.loading
-    ? [h(Text, { key: "l", dimColor: true }, "    扫描中…")]
-    : state.suffixes.length
-      ? state.suffixes.map((s) =>
-          h(Text, { key: s }, "    ", h(Text, { color: theme.colors.info }, "+." + s)),
-        )
-      : [h(Text, { key: "n", dimColor: true }, "    无")];
-
-  return h(
-    Box,
-    { flexDirection: "column" },
-    h(Text, { dimColor: true }, "  tunless proxy 依据此表决定目标走直连还是走内核"),
-    "",
-    h(
-      Text,
-      null,
-      "  ",
-      h(Text, { bold: true }, "内网后缀"),
-      "  ",
-      h(Text, { dimColor: true }, "(直连，不经过代理)"),
-    ),
-    ...suffixRows,
-    "",
-    h(
-      Text,
-      null,
-      "  ",
-      h(Text, { bold: true }, "其他域名"),
-      "  ",
-      h(Text, { dimColor: true }, "(转交内核 7897 端口)"),
-    ),
-    h(Text, { dimColor: true }, "    *"),
-    h(Section, { title: "提示" }, [
-      h(Text, { key: "t", dimColor: true }, "  内网域名不会进入代理，因此不会拿到假 IP 地址。"),
-    ]),
-  );
-}
-
-export function EventsPanel({ events }) {
-  if (!events.length) {
-    return h(Box, { flexDirection: "column" }, h(Text, { dimColor: true }, "  暂无操作记录"));
-  }
-  return h(
-    Box,
-    { flexDirection: "column" },
-    ...events
-      .slice(-40)
-      .reverse()
-      .map((e, i) =>
-        h(
-          Text,
-          { key: `${e.time}-${i}` },
-          "  ",
-          h(Text, { dimColor: true }, e.time),
-          " ",
-          h(Badge, { tone: e.kind === "muted" ? "info" : e.kind }),
-          " ",
-          e.text,
-        ),
-      ),
-  );
-}

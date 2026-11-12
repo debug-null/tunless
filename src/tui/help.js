@@ -15,59 +15,33 @@ export const PROXY_INFO = {
  * 根据当前状态给出「下一步该做什么」。
  * 用户最常见的问题不是「诊断结果是什么」，而是「所以我现在该按哪个键」。
  */
-export function nextSteps(state) {
-  const steps = [];
-
+export function nextSteps(state, opts = {}) {
+  // 一个界面一次只该告诉用户「下一步做这一件事」。
+  // 之前把所有问题堆在一起，用户反而不知道先按哪个。
   if (!state.core.reachable) {
-    steps.push({
-      key: "",
-      text: "代理内核连不上：先确认 Clash Verge Rev 正在运行",
-    });
+    return [{ key: "", text: "代理内核连不上：先确认 Clash Verge 正在运行" }];
   }
 
   if (!state.sidecar.installed) {
-    steps.push({
-      key: "s",
-      text: "转发服务还没装，按 s 安装并启动它（会监听 127.0.0.1:8899）",
-    });
-  } else if (!state.sidecar.running) {
-    steps.push({
-      key: "s",
-      text: "转发服务没在跑，按 s 启动它（会监听 127.0.0.1:8899）",
-    });
-  } else {
-    steps.push({
-      key: "l",
-      text: "转发服务已在运行，用它重启 Antigravity，应用就会走代理",
-    });
+    return [{ key: "s", text: "第一步：按 s 装好转发服务（之后它会开机自启）" }];
   }
 
-  const unsupported = state.processes.filter((p) => p.status === "unsupported");
-  if (unsupported.length) {
-    steps.push({
-      key: "",
-      text: `${unsupported.length} 个运行中的程序不支持代理（比如 ${unsupported[0].comm}），只能靠 tunless 转发，或者开 TUN`,
-    });
+  if (!state.sidecar.running) {
+    return [{ key: "s", text: "转发服务没在跑，按 s 启动它" }];
   }
 
   if (state.fakeCount > 0) {
-    steps.push({
-      key: "f",
-      text: `${state.fakeCount} 个域名还拿到假 IP 地址，生成并应用修复方案`,
-    });
+    return [{ key: "f", text: `${state.fakeCount} 个内网域名拿到假 IP，按 f 修一下` }];
   }
 
-  if (state.internalDomains.length > 0) {
-    steps.push({
-      key: "",
-      text: `${state.internalDomains.length} 个内网域名解析正确，走直连，不经过代理`,
-    });
-  }
-
-  if (!steps.length) {
-    steps.push({ key: "", text: "一切正常，不需要做任何操作" });
-  }
-  return steps;
+  const nextApp = opts.nextApp ?? "Antigravity";
+  return [
+    {
+      key: "l",
+      text: `转发服务已就绪：按 l 用代理重启 ${nextApp}（再按一次换另一个应用）`,
+    },
+    { key: "a", text: "有扫不到的内网域名，按 a 直接手写一条" },
+  ];
 }
 
 /** 键名 + 说明，排成一行 */
@@ -91,9 +65,11 @@ export function HelpPanel({ width }) {
   ];
 
   const stepsRows = [
-    kv("第 1 步", [txt("按 s 安装／启动转发服务，监听 127.0.0.1:8899")], 10),
-    kv("第 2 步", [txt("按 l 用这个代理重启 Agent（默认 Antigravity）")], 10),
-    kv("第 3 步", [txt("内网域名解析不对时按 f 生成并应用修复")], 10),
+    kv("第 1 步", [txt("按 s 装好转发服务（监听 127.0.0.1:8899）")], 10),
+    kv("第 2 步", [txt("按 l 用代理重启应用，按一次换一个（Antigravity → Cursor）")], 10),
+    kv("第 3 步", [txt("内网域名扫不到？按 a 直接手写，不用给任何权限")], 10),
+    [txt("  ")],
+    kv("Cursor 用户", [txt("按 L 走 Cursor 专用流程：改设置 + 关 HTTP/2 + 重启")], 10),
   ];
 
   const proxyRows = [
@@ -110,10 +86,11 @@ export function HelpPanel({ width }) {
   ];
 
   const cmdRows = [
-    kv("tunless doctor", [txt("只诊断，不改任何东西")], 22),
-    kv("tunless scan", [txt("列出扫到的内网域名")], 22),
-    kv("tunless fix", [txt("生成并应用修复方案")], 22),
-    kv("tunless launch", [txt("带代理重启某个应用")], 22),
+    kv("tunless doctor", [txt("只诊断，不改任何东西")], 24),
+    kv("tunless cursor", [txt("给 Cursor 配好代理并重启（模型连不上用这个）")], 24),
+    kv("tunless rules add", [txt("手动补内网域名 / 关键词 / IP 段")], 24),
+    kv("tunless fix", [txt("生成并应用 DNS 分流修复")], 24),
+    kv("tunless launch", [txt("带代理重启某个应用")], 24),
   ];
 
   return h(
