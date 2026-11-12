@@ -1,4 +1,6 @@
 import fs from "node:fs";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import https from "node:https";
 import os from "node:os";
 import path from "node:path";
@@ -27,6 +29,7 @@ import { VergeAdapter } from "./adapters/verge.js";
 import { GenericAdapter } from "./adapters/generic.js";
 
 const DEFAULT_INTERNAL_DNS = "10.249.150.130";
+const exec = promisify(execFile);
 
 const C = {
   reset: "\x1b[0m",
@@ -390,6 +393,69 @@ export async function cmdProxy(args) {
 }
 
 
+
+export async function cmdLaunch(args) {
+  const app = args.flags.app || args._[1] || "Antigravity";
+  const httpPort = Number(args.flags.port || 8899);
+  const socksPort = Number(args.flags["socks-port"] ?? 8898);
+  const noProxy = args.flags["no-proxy"] || "";
+
+  // Resolve the internal domains the same way the sidecar does, so the
+  // NO_PROXY list stays consistent with the routing rules.
+  const internalDns = args.flags["internal-dns"] || DEFAULT_INTERNAL_DNS;
+  const frontend = await pickFrontend(args);
+  const repoRoots = args.flags.repos
+    ? String(args.flags.repos).split(",").map((s) => s.trim()).filter(Boolean)
+    : [];
+  const suffixes = await collectInternalSuffixes(frontend, internalDns, {
+    scan: args.flags["no-scan"] !== true,
+    repoRoots,
+  });
+  const noProxyList = ["127.0.0.1", "localhost", "::1", ".local", ...suffixes]
+    .filter(Boolean)
+    .join(",");
+
+  const env = {
+    HTTPS_PROXY: `http://127.0.0.1:${httpPort}`,
+    HTTP_PROXY: `http://127.0.0.1:${httpPort}`,
+    https_proxy: `http://127.0.0.1:${httpPort}`,
+    http_proxy: `http://127.0.0.1:${httpPort}`,
+    NO_PROXY: noProxyList,
+    no_proxy: noProxyList,
+  };
+  if (socksPort) {
+    env.ALL_PROXY = `socks5://127.0.0.1:${socksPort}`;
+    env.all_proxy = env.ALL_PROXY;
+  }
+
+  console.log(head("\n── netfix launch ──\n"));
+  console.log(`  ${info(`app: ${app}`)}`);
+  console.log(`  ${info(`proxy: http://127.0.0.1:${httpPort}${socksPort ? ` / socks5://127.0.0.1:${socksPort}` : ""}`)}`);
+  console.log(`  ${dim(`NO_PROXY: ${noProxyList}`)}`);
+
+  if (args.flags["print-env"] === true) {
+    console.log();
+    return 0;
+  }
+
+  // Quit any running instance first so the new environment takes effect.
+  const appName = app.replace(/\.app$/, "");
+  try {
+    await exec("osascript", ["-e", `quit app "${appName}"`], { timeout: 10000 });
+  } catch {
+    // not running
+  }
+  await new Promise((r) => setTimeout(r, 2500));
+
+  const openArgs = ["-a", appName];
+  for (const [key, value] of Object.entries(env)) {
+    openArgs.push("--env", `${key}=${value}`);
+  }
+  await exec("open", openArgs, { timeout: 15000 });
+  console.log(`\n  ${ok(`launched ${appName} with netfix proxy`)}\n`);
+  return 0;
+}
+
 export async function cmdService(args) {
   const action = args._[1] || args.flags.action || "status";
   const forward = ["proxy", ...process.argv.slice(4)];
@@ -618,6 +684,7 @@ ${head("Usage")}
   netfix fix [options]        Plan, preview, apply and verify a repair
   netfix proxy [options]      Run a local proxy that hands proxy access to tools
   netfix service <action>     install | uninstall | status | logs (run proxy at login)
+  netfix launch [app]        Restart an app with the netfix proxy environment
 
 ${head("Options")}
   --internal-dns <ip>   Internal DNS server (default ${DEFAULT_INTERNAL_DNS})
@@ -628,6 +695,7 @@ ${head("Options")}
   --port <n>            HTTP proxy port for 'netfix proxy' (default 8899)
   --socks-port <n>      SOCKS5 proxy port (default 8898, 0 disables)
   --print-env           Print the proxy environment and exit
+  --app <name>          App to launch (default Antigravity)
   --no-scan             'netfix proxy': use only the client config, skip scanning
   --yes, -y             Skip the confirmation prompt
   --help, -h            Show this help
@@ -659,6 +727,8 @@ export async function main(argv) {
         return await cmdProxy(args);
       case "service":
         return await cmdService(args);
+      case "launch":
+        return await cmdLaunch(args);
       default:
         console.error(`unknown command: ${cmd}`);
         console.log(HELP);
