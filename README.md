@@ -26,6 +26,7 @@ chmod +x ~/github/netfix/bin/netfix.js
 netfix doctor          # diagnose only — never writes anything
 netfix scan            # list candidate domains and how they resolve
 netfix fix             # plan → preview diff → confirm → apply → verify → rollback on failure
+netfix proxy           # run a local proxy that hands proxy access to tools
 ```
 
 ### Options
@@ -58,6 +59,54 @@ Addresses in `198.18.0.0/16` mean the domain still resolves to a *fake-IP*: it n
 5. Verify: re-resolve every internal host and confirm it still lands on a private IP. On failure the backup is restored automatically.
 
 Backups are written to `~/.netfix/backups/<timestamp>/` before anything is changed.
+
+## `netfix proxy` — proxy access for tools that ignore the system proxy
+
+Many tools (Electron apps, some CLI tools, IDE plugins) never read the macOS
+system proxy, so the usual answer is "turn on TUN". TUN hijacks the whole
+machine, which is heavy and tends to break internal networks.
+
+`netfix proxy` is the lighter alternative: it is a small local forward proxy
+that sits between the tool and the running mihomo core.
+
+```bash
+netfix proxy
+#   http proxy  : http://127.0.0.1:8899
+#   socks5 proxy: socks5://127.0.0.1:8898
+
+export HTTPS_PROXY=http://127.0.0.1:8899
+export HTTP_PROXY=http://127.0.0.1:8899
+export ALL_PROXY=socks5://127.0.0.1:8898
+export NO_PROXY=17usoft.com,17u.cn
+```
+
+Routing rules:
+
+| Target | Action |
+| --- | --- |
+| Internal domain (matches the internal suffix list) | resolve through the internal DNS server, connect straight to the private address |
+| Everything else | tunnelled to the upstream mihomo mixed port |
+
+The internal suffix list comes from the client config that is already in use
+(the `nameserver-policy` keys) plus a live scan, so `netfix proxy` inherits
+whatever `netfix fix` has already configured — the proxy information is read
+from the running core, never hard-coded.
+
+Useful flags:
+
+| Flag | Meaning |
+| --- | --- |
+| `--port <n>` | HTTP proxy port (default `8899`) |
+| `--socks-port <n>` | SOCKS5 port (default `8898`, `0` disables) |
+| `--print-env` | Print the environment and exit, without listening |
+| `--no-scan` | Use only the client config, skip the live scan |
+| `--upstream <host:port>` | Override the upstream core listener |
+
+To keep it running in the background:
+
+```bash
+nohup netfix proxy > ~/.netfix/proxy.log 2>&1 &
+```
 
 ## Program proxy capability
 

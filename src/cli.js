@@ -15,6 +15,7 @@ import {
   renderDiff,
 } from "./core/plan.js";
 import { dumpYaml } from "./core/yaml.js";
+import { HttpProxyServer, Socks5Server } from "./core/relay.js";
 import { VergeAdapter } from "./adapters/verge.js";
 import { GenericAdapter } from "./adapters/generic.js";
 
@@ -212,6 +213,11 @@ export async function cmdDoctor(args) {
     if (p.status === "unsupported") console.log(dim(`      ${proxyAdvice(p)}`));
   }
 
+  console.log(head("\n── Sidecar ──"));
+  console.log(`  ${info("netfix proxy gives tools proxy access without TUN")}`);
+  console.log(dim("    netfix proxy            # HTTP 8899 / SOCKS5 8898"));
+  console.log(dim("    export HTTPS_PROXY=http://127.0.0.1:8899"));
+
   console.log(head("\n── Internal domains ──"));
   const repoRoots = args.flags.repos
     ? String(args.flags.repos).split(",").map((s) => s.trim()).filter(Boolean)
@@ -243,6 +249,126 @@ export async function cmdDoctor(args) {
 
   console.log();
   return exitCode;
+}
+
+
+export async function collectInternalSuffixes(frontend, internalDns, { scan = true, repoRoots = [] } = {}) {
+  const suffixes = new Set();
+
+  // 1. whatever the running client already routes to the internal resolver
+  try {
+    const adapter = resolveAdapter(frontend);
+    const dns = adapter.readCurrentDns?.() ?? {};
+    for (const key of Object.keys(dns["nameserver-policy"] ?? {})) {
+      const clean = String(key).replace(/^\+\./, "").replace(/^["']|["']$/g, "");
+      if (clean) suffixes.add(clean);
+    }
+    for (const entry of dns["fake-ip-filter"] ?? []) {
+      const clean = String(entry).replace(/^\+\./, "").replace(/^\*\./, "").replace(/^["']|["']$/g, "");
+      if (clean && clean.includes(".")) suffixes.add(clean);
+    }
+  } catch {
+    // no readable client config — fall back to the scan only
+  }
+
+  // 2. hosts we can observe resolving to private addresses right now
+  if (scan) {
+    const scanned = await scanAll({ repoRoots, includeChrome: false });
+    const results = await probeDomains(scanned.hosts.map((h) => h.host), internalDns);
+    const { internal } = partitionByKind(results);
+    for (const suffix of mergeHosts(internal.map((r) => r.name))) suffixes.add(suffix);
+  }
+
+  return [...suffixes].sort();
+}
+
+export async function cmdProxy(args) {
+  const internalDns = args.flags["internal-dns"] || DEFAULT_INTERNAL_DNS;
+  const frontend = await pickFrontend(args);
+  const httpPort = Number(args.flags.port || 8899);
+  const socksPort = Number(args.flags["socks-port"] ?? 8898);
+
+  let upstream = { host: "127.0.0.1", port: frontend.mixedPort || 7897 };
+  let coreVersion = null;
+
+  if (typeof args.flags.upstream === "string") {
+    const raw = args.flags.upstream.trim();
+    const idx = raw.lastIndexOf(":");
+    upstream = idx === -1
+      ? { host: raw, port: upstream.port }
+      : { host: raw.slice(0, idx), port: Number(raw.slice(idx + 1)) || upstream.port };
+  }
+  try {
+    const conn = await connect(frontend);
+    const cfg = await conn.api.configs();
+    coreVersion = conn.info.version;
+    if (cfg["mixed-port"]) upstream = { host: "127.0.0.1", port: Number(cfg["mixed-port"]) };
+  } catch (err) {
+    console.log(`  ${warn(`could not read the core config: ${err.message}`)}`);
+  }
+
+  const repoRoots = args.flags.repos
+    ? String(args.flags.repos).split(",").map((s) => s.trim()).filter(Boolean)
+    : [];
+  const suffixes = await collectInternalSuffixes(frontend, internalDns, {
+    scan: args.flags["no-scan"] !== true,
+    repoRoots,
+  });
+
+  console.log(head("\n── netfix proxy ──\n"));
+  console.log(`  ${info(`upstream core: ${upstream.host}:${upstream.port}${coreVersion ? ` (mihomo ${coreVersion})` : ""}`)}`);
+  console.log(`  ${info(`internal domains: ${suffixes.length ? suffixes.join(", ") : "none detected"}`)}`);
+  console.log(`  ${ok(`http proxy  : http://127.0.0.1:${httpPort}`)}`);
+  if (socksPort) console.log(`  ${ok(`socks5 proxy: socks5://127.0.0.1:${socksPort}`)}`);
+
+  const noProxy = suffixes.join(",");
+  console.log(head("\n  Point your tool at it:"));
+  console.log(dim("    export HTTPS_PROXY=http://127.0.0.1:" + httpPort));
+  console.log(dim("    export HTTP_PROXY=http://127.0.0.1:" + httpPort));
+  if (socksPort) console.log(dim("    export ALL_PROXY=socks5://127.0.0.1:" + socksPort));
+  if (noProxy) console.log(dim(`    export NO_PROXY=${noProxy}`));
+  console.log(dim("    (lowercase variants work too)"));
+
+  if (args.flags["print-env"] === true) {
+    console.log();
+    return 0;
+  }
+
+  const log = (line) => console.log(dim(`    ${line}`));
+  const httpServer = new HttpProxyServer({
+    port: httpPort,
+    upstream,
+    internalDns,
+    internalSuffixes: suffixes,
+    log,
+  });
+  await httpServer.start();
+
+  let socksServer = null;
+  if (socksPort) {
+    socksServer = new Socks5Server({
+      port: socksPort,
+      upstream,
+      internalDns,
+      internalSuffixes: suffixes,
+      log,
+    });
+    await socksServer.start();
+  }
+
+  console.log(head("\n  Listening — press Ctrl+C to stop.\n"));
+
+  const shutdown = async () => {
+    console.log(dim("\n  stopping…"));
+    await httpServer.stop();
+    if (socksServer) await socksServer.stop();
+    process.exit(0);
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+
+  await new Promise(() => {});
+  return 0;
 }
 
 export async function cmdFix(args) {
@@ -432,6 +558,7 @@ ${head("Usage")}
   netfix doctor [options]     Diagnose environment, programs and internal domains
   netfix scan [options]       List candidate domains and how they resolve
   netfix fix [options]        Plan, preview, apply and verify a repair
+  netfix proxy [options]      Run a local proxy that hands proxy access to tools
 
 ${head("Options")}
   --internal-dns <ip>   Internal DNS server (default ${DEFAULT_INTERNAL_DNS})
@@ -439,6 +566,10 @@ ${head("Options")}
   --no-chrome           Skip Chrome history (it needs Full Disk Access)
   --frontend <id>       Force a frontend: clash-verge-rev | generic-mihomo
   --config <path>       Explicit config file (generic frontend)
+  --port <n>            HTTP proxy port for 'netfix proxy' (default 8899)
+  --socks-port <n>      SOCKS5 proxy port (default 8898, 0 disables)
+  --print-env           Print the proxy environment and exit
+  --no-scan             'netfix proxy': use only the client config, skip scanning
   --yes, -y             Skip the confirmation prompt
   --help, -h            Show this help
 
@@ -465,6 +596,8 @@ export async function main(argv) {
         return await cmdScan(args);
       case "fix":
         return await cmdFix(args);
+      case "proxy":
+        return await cmdProxy(args);
       default:
         console.error(`unknown command: ${cmd}`);
         console.log(HELP);
