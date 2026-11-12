@@ -66,6 +66,79 @@ export function mergeHosts(hosts, extraSuffixes = []) {
   return [...out].sort();
 }
 
+
+// Suffix collapsing must not swallow a publicly-routed parent. If the
+// registrable domain resolves to a public address, routing everything under it
+// direct would break normal internet access — so the suffix has to stay below
+// that public boundary (ai.corp.elong.com -> corp.elong.com, not elong.com).
+function ancestorsBetween(host, base) {
+  // [base, ..., host] ordered from broadest to most specific.
+  const hostParts = host.split(".").filter(Boolean);
+  const baseParts = base.split(".").filter(Boolean);
+  const out = [base];
+  for (let take = baseParts.length + 1; take < hostParts.length; take += 1) {
+    out.push(hostParts.slice(-take).join("."));
+  }
+  return out;
+}
+
+export async function mergeHostsValidated(
+  hosts,
+  { classify, extraSuffixes = [], observed = [] } = {},
+) {
+  const all = [...new Set(hosts.filter(Boolean))];
+  const observedSet = new Set([...all, ...observed]);
+  const cache = new Map();
+
+  const kindOf = async (name) => {
+    if (!classify) return "unknown";
+    if (!cache.has(name)) {
+      try {
+        const res = await classify(name);
+        cache.set(name, res?.kind ?? "unknown");
+      } catch {
+        cache.set(name, "unknown");
+      }
+    }
+    return cache.get(name);
+  };
+
+  const narrow = async (host, base) => {
+    // Walk down from the registrable domain until the first non-public level.
+    for (const ancestor of ancestorsBetween(host, base)) {
+      if ((await kindOf(ancestor)) !== "public") return ancestor;
+    }
+    return host;
+  };
+
+  const out = new Set();
+  for (const host of all) {
+    const base = registrableSuffix(host, extraSuffixes);
+    if (base === host) {
+      out.add(host);
+      continue;
+    }
+
+    if ((await kindOf(base)) === "public") {
+      // Public parent: never widen past the first private level.
+      out.add(await narrow(host, base));
+      continue;
+    }
+
+    if (observedSet.has(base)) {
+      // The parent domain was observed on its own, so this is a distinct
+      // delegation that needs its own entry: cdb.17usoft.com alongside
+      // 17usoft.com. Stop at three labels — nothing deeper is a zone.
+      const parts = host.split(".").filter(Boolean);
+      out.add(parts.length >= 3 ? parts.slice(-3).join(".") : host);
+      continue;
+    }
+
+    out.add(base);
+  }
+  return [...out].sort();
+}
+
 // A host is "internal" when it resolves to an RFC1918 private address.
 // fake-ip (198.18.0.0/16) means the domain still needs a fake-ip-filter entry
 // so it resolves for real instead of being handed a synthetic address.

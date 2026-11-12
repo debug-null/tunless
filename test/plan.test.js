@@ -91,3 +91,40 @@ test("buildDnsSection preserves existing dns settings", () => {
   assert.ok(dns["fake-ip-filter"].includes("*.local"));
   assert.ok(dns.nameserver.includes("1.1.1.1"));
 });
+
+test("mergeHostsValidated never widens past a publicly routed parent", async () => {
+  const kinds = {
+    "elong.com": "public",
+    "corp.elong.com": "internal",
+    "vip.elong.com": "internal",
+    "ai.corp.elong.com": "internal",
+    "tchotel.vip.elong.com": "internal",
+  };
+  const classify = async (name) => ({ kind: kinds[name] ?? "nxdomain" });
+  const { mergeHostsValidated } = await import("../src/core/plan.js");
+  const suffixes = await mergeHostsValidated(
+    ["ai.corp.elong.com", "tchotel.vip.elong.com"],
+    { classify },
+  );
+  assert.deepEqual(suffixes, ["corp.elong.com", "vip.elong.com"]);
+});
+
+test("mergeHostsValidated keeps collapsing when the parent is private", async () => {
+  const classify = async () => ({ kind: "internal" });
+  const { mergeHostsValidated } = await import("../src/core/plan.js");
+  const suffixes = await mergeHostsValidated(
+    ["matrix.17usoft.com", "git.17usoft.com"],
+    { classify },
+  );
+  assert.deepEqual(suffixes, ["17usoft.com"]);
+});
+
+test("mergeHostsValidated keeps an observed sub-delegation beside its parent", async () => {
+  const classify = async () => ({ kind: "internal" });
+  const { mergeHostsValidated } = await import("../src/core/plan.js");
+  const suffixes = await mergeHostsValidated(
+    ["cdb.17usoft.com", "17usoft.com"],
+    { classify },
+  );
+  assert.deepEqual(suffixes, ["17usoft.com", "cdb.17usoft.com"]);
+});

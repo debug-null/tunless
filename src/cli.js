@@ -11,11 +11,18 @@ import { inspectProcesses, proxyAdvice } from "./core/proc.js";
 import {
   partitionByKind,
   mergeHosts,
+  mergeHostsValidated,
   buildDnsSection,
   renderDiff,
 } from "./core/plan.js";
 import { dumpYaml } from "./core/yaml.js";
 import { HttpProxyServer, Socks5Server } from "./core/relay.js";
+import {
+  installService,
+  uninstallService,
+  serviceStatus,
+  readServiceLog,
+} from "./core/launchd.js";
 import { VergeAdapter } from "./adapters/verge.js";
 import { GenericAdapter } from "./adapters/generic.js";
 
@@ -95,6 +102,14 @@ function backendDir() {
 
 function backupDir() {
   return path.join(backendDir(), "backups", new Date().toISOString().replace(/[:.]/g, "-"));
+}
+
+function validatedMerger(internalDns, extraSuffixes = []) {
+  return (hosts) =>
+    mergeHostsValidated(hosts, {
+      classify: (name) => classifyDomain(name, internalDns),
+      extraSuffixes,
+    });
 }
 
 async function probeDomains(hosts, internalDns, concurrency = 8) {
@@ -230,7 +245,7 @@ export async function cmdDoctor(args) {
   console.log(`  ${info(`${fake.length} domain(s) still resolve to fake-ip`)}`);
 
   if (api) {
-    const suffixes = mergeHosts(internal.map((r) => r.name));
+    const suffixes = await validatedMerger(internalDns)(internal.map((r) => r.name));
     if (suffixes.length) {
       let missing = [];
       for (const s of suffixes) {
@@ -276,7 +291,9 @@ export async function collectInternalSuffixes(frontend, internalDns, { scan = tr
     const scanned = await scanAll({ repoRoots, includeChrome: false });
     const results = await probeDomains(scanned.hosts.map((h) => h.host), internalDns);
     const { internal } = partitionByKind(results);
-    for (const suffix of mergeHosts(internal.map((r) => r.name))) suffixes.add(suffix);
+    for (const suffix of await validatedMerger(internalDns)(internal.map((r) => r.name))) {
+      suffixes.add(suffix);
+    }
   }
 
   return [...suffixes].sort();
@@ -371,6 +388,46 @@ export async function cmdProxy(args) {
   return 0;
 }
 
+
+export async function cmdService(args) {
+  const action = args._[1] || args.flags.action || "status";
+  const forward = ["proxy", ...process.argv.slice(4)];
+
+  if (action === "install") {
+    const { plist } = await installService({ args: forward });
+    console.log(`\n  ${ok("installed proxy sidecar as a launch agent")}`);
+    console.log(dim(`    ${plist}`));
+    const status = await serviceStatus();
+    console.log(`  ${status.running ? ok(`running (pid ${status.pid})`) : warn("not running yet")}`);
+    console.log(dim(`    logs: ~/.netfix/proxy.log`));
+    console.log(dim(`    stop: netfix service uninstall\n`));
+    return status.running ? 0 : 1;
+  }
+
+  if (action === "uninstall" || action === "stop") {
+    await uninstallService();
+    console.log(`\n  ${ok("proxy sidecar removed")}\n`);
+    return 0;
+  }
+
+  if (action === "logs") {
+    const text = readServiceLog(40);
+    console.log(text ? text : dim("  no log yet — start it with: netfix service install"));
+    return 0;
+  }
+
+  const status = await serviceStatus();
+  console.log(head("\n── netfix service ──\n"));
+  console.log(`  ${status.installed ? ok("launch agent installed") : warn("not installed")} ${dim(status.plist)}`);
+  if (status.installed) {
+    console.log(`  ${status.running ? ok(`running (pid ${status.pid})`) : bad("installed but not running")}`);
+  }
+  console.log(dim("\n  netfix service install     # start at login, keep alive"));
+  console.log(dim("  netfix service uninstall   # remove it"));
+  console.log(dim("  netfix service logs\n"));
+  return status.installed && status.running ? 0 : 0;
+}
+
 export async function cmdFix(args) {
   const internalDns = args.flags["internal-dns"] || DEFAULT_INTERNAL_DNS;
   const assumeYes = args.flags.yes === true || args.flags.y === true;
@@ -399,7 +456,7 @@ export async function cmdFix(args) {
     return 0;
   }
 
-  const suffixes = mergeHosts(internal.map((r) => r.name));
+  const suffixes = await validatedMerger(internalDns)(internal.map((r) => r.name));
   const existing = adapter.readCurrentDns();
   const dnsSection = buildDnsSection({
     internalDns,
@@ -559,6 +616,7 @@ ${head("Usage")}
   netfix scan [options]       List candidate domains and how they resolve
   netfix fix [options]        Plan, preview, apply and verify a repair
   netfix proxy [options]      Run a local proxy that hands proxy access to tools
+  netfix service <action>     install | uninstall | status | logs (run proxy at login)
 
 ${head("Options")}
   --internal-dns <ip>   Internal DNS server (default ${DEFAULT_INTERNAL_DNS})
@@ -598,6 +656,8 @@ export async function main(argv) {
         return await cmdFix(args);
       case "proxy":
         return await cmdProxy(args);
+      case "service":
+        return await cmdService(args);
       default:
         console.error(`unknown command: ${cmd}`);
         console.log(HELP);
