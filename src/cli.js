@@ -190,7 +190,8 @@ export async function cmdDoctor(args) {
       const tun = cfg.tun?.enable;
       console.log(`  ${tun ? ok("TUN mode enabled") : warn("TUN mode disabled")}`);
       if (!tun) {
-        console.log(dim("    programs that ignore system proxy cannot reach proxied networks without TUN"));
+        console.log(dim("    programs that read HTTPS_PROXY/ALL_PROXY are covered by: netfix proxy"));
+        console.log(dim("    programs that ignore the proxy entirely need TUN mode"));
       }
       const mode = cfg.mode;
       console.log(`  ${info(`rule mode: ${mode}`)}`);
