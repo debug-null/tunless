@@ -12,6 +12,9 @@ import {
   charWidth,
 } from "../src/tui/width.js";
 import { OverviewPanel, DomainsPanel, ProcessesPanel, EventsPanel } from "../src/tui/panels.js";
+import { Card, kv, txt, ThemeProvider } from "../src/tui/ui.js";
+import { getTheme, detectUnicode, symbolSet, borderSet } from "../src/tui/theme.js";
+import { splitGraphemes } from "../src/tui/width.js";
 
 const h = React.createElement;
 
@@ -160,4 +163,66 @@ test("日志面板渲染带时间的记录", async () => {
   );
   assert.match(text, /12:00:00/);
   assert.match(text, /状态已更新/);
+});
+
+test("emoji 组合序列按一个字素簇计算宽度", () => {
+  // 家族 emoji 由多个码点加 ZWJ 组成，整体只占两列
+  assert.equal(displayWidth("👨‍👩‍👧"), 2);
+  assert.equal(splitGraphemes("👨‍👩‍👧").length, 1);
+  // 截断不会把组合序列切坏
+  const cut = truncate("👨‍👩‍👧家人们", 4);
+  assert.ok(cut.endsWith("…"));
+  assert.equal(displayWidth(cut) <= 4, true);
+});
+
+test("符号与边框可以降级成 ASCII", () => {
+  assert.equal(symbolSet(true).ok, "✔");
+  assert.equal(symbolSet(false).ok, "+");
+  assert.equal(borderSet(true).vertical, "│");
+  assert.equal(borderSet(false).vertical, "|");
+});
+
+test("UTF-8 环境用 Unicode 符号", () => {
+  const saved = {
+    LC_ALL: process.env.LC_ALL,
+    LC_CTYPE: process.env.LC_CTYPE,
+    LANG: process.env.LANG,
+  };
+  delete process.env.LC_ALL;
+  delete process.env.LC_CTYPE;
+  process.env.LANG = "zh_CN.UTF-8";
+  assert.equal(detectUnicode(), true);
+  process.env.LANG = "C";
+  assert.equal(detectUnicode(), false);
+  for (const [key, value] of Object.entries(saved)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+});
+
+test("卡片每一行的显示宽度一致（中文不撑破边框）", async () => {
+  const rows = [
+    kv("客户端", [txt("Clash Verge Rev")]),
+    kv("内网域名", [txt("16 个解析到私网地址")]),
+    [txt("  只有完全忽略代理的程序才需要它", { dim: true })],
+  ];
+  const text = await shot(
+    h(
+      ThemeProvider,
+      { theme: getTheme("dark"), unicode: true },
+      h(Box, { flexDirection: "column" }, h(Card, { title: "代理内核", width: 48, rows })),
+    ),
+  );
+  const widths = text
+    .split("\n")
+    .filter((line) => line.trim())
+    .map((line) => displayWidth(line));
+  assert.ok(widths.length >= 4, `卡片行数不足：${widths.length}`);
+  assert.equal(new Set(widths).size, 1, `卡片各行宽度不一致：${widths.join(",")}`);
+});
+
+test("亮色主题用深色前景字，暗色主题用白色", () => {
+  assert.equal(getTheme("dark").colors.text, "white");
+  assert.equal(getTheme("light").colors.text, "black");
+  assert.equal(getTheme("light").colors.warn, "magenta");
 });

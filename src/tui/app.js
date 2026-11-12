@@ -1,12 +1,23 @@
 // TUI 主程序：基于 ink 的图形界面。
 //
 // 负责整体布局、按键分发，以及刷新／修复／转发／服务／重启等操作。
+//
+// 主题：启动时用 OSC 11 询问终端背景色，按亮暗切换配色；
+// 终端不支持 Unicode 时符号与边框降级成 ASCII。
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
-import { render, Box, Text, useApp, useInput, useStdout } from "ink";
-import { h } from "./ui.js";
-import { TONE } from "./theme.js";
-import { PANELS, OverviewPanel, DomainsPanel, ProcessesPanel, RoutesPanel, EventsPanel } from "./panels.js";
+import React, { useCallback, useEffect, useState } from "react";
+import { render, renderToString, Box, Text, useApp, useInput, useStdout } from "ink";
+import { h, ThemeProvider, Tabs, useTheme } from "./ui.js";
+import { getTheme, detectUnicode } from "./theme.js";
+import { queryTerminalColorScheme, themeFromEnv } from "./terminal-theme.js";
+import {
+  PANELS,
+  OverviewPanel,
+  DomainsPanel,
+  ProcessesPanel,
+  RoutesPanel,
+  EventsPanel,
+} from "./panels.js";
 import { collectState, emptyState } from "./state.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -21,11 +32,13 @@ const PANEL_COMPONENTS = {
   events: EventsPanel,
 };
 
-const DEFAULT_HINT = "r 刷新 · f 修复 · p 转发 · S 服务 · l 重启应用 · 1-5 切换 · q 退出";
+const DEFAULT_HINT =
+  "← → 切换面板 · r 刷新 · f 修复 · p 转发 · S 服务 · l 重启应用 · 1-5 切换 · / 过滤 · q 退出";
 
 export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const { exit } = useApp();
   const { stdout } = useStdout();
+  const theme = useTheme();
 
   const [state, setState] = useState(emptyState);
   const [panel, setPanel] = useState("overview");
@@ -36,10 +49,6 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const [scroll, setScroll] = useState(0);
   const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState("");
-
-  // 供事件回调读取最新状态，避免把回调塞进依赖数组。
-  const busyRef = useRef(false);
-  busyRef.current = busy;
 
   const log = useCallback((text, kind = "info") => {
     const time = new Date().toLocaleTimeString("zh-CN", { hour12: false });
@@ -142,7 +151,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
 
   const runAction = useCallback(
     async (name) => {
-      if (busyRef.current) {
+      if (busy) {
         setHint("正在处理中，请稍候");
         return;
       }
@@ -159,7 +168,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       }
       setBusy(false);
     },
-    [refresh, runFix, runProxy, runService, runLaunch, log],
+    [busy, refresh, runFix, runProxy, runService, runLaunch, log],
   );
 
   // 首次进入自动采集一次。
@@ -173,11 +182,22 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     return () => clearInterval(timer);
   }, []);
 
+  /** 切换面板，并复位滚动与搜索 */
   const switchPanel = useCallback((id) => {
     setPanel(id);
     setScroll(0);
     setHint("");
   }, []);
+
+  /** 左右方向键在面板之间循环切换 */
+  const cyclePanel = useCallback(
+    (step) => {
+      const index = PANELS.findIndex((p) => p.id === panel);
+      const next = PANELS[(index + step + PANELS.length) % PANELS.length];
+      switchPanel(next.id);
+    },
+    [panel, switchPanel],
+  );
 
   useInput((input, key) => {
     // 搜索模式：按键全部进入搜索框。
@@ -206,6 +226,19 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
 
     if (input === "q") {
       exit();
+      return;
+    }
+    // 左右方向键切换面板
+    if (key.leftArrow) {
+      cyclePanel(-1);
+      return;
+    }
+    if (key.rightArrow) {
+      cyclePanel(1);
+      return;
+    }
+    if (key.tab) {
+      cyclePanel(1);
       return;
     }
     if (key.upArrow || input === "k") {
@@ -276,34 +309,17 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   };
 
   const right = busy
-    ? h(Text, { color: TONE.warn }, progress || "正在采集…")
+    ? h(Text, { color: theme.colors.warn }, progress || "正在采集…")
     : state.updatedAt
       ? h(
           Text,
           { dimColor: true },
           `更新于 ${state.updatedAt.toLocaleTimeString("zh-CN", { hour12: false })}`,
         )
-      : h(Text, { dimColor: true }, "");
-
-  const tabs = h(
-    Box,
-    { flexDirection: "row", gap: 1 },
-    PANELS.map((p) =>
-      h(
-        Text,
-        {
-          key: p.id,
-          color: p.id === panel ? TONE.accent : TONE.muted,
-          bold: p.id === panel,
-          inverse: p.id === panel,
-        },
-        ` ${p.key} ${p.name} `,
-      ),
-    ),
-  );
+      : null;
 
   const help = searching
-    ? h(Text, { color: TONE.info }, `搜索：${query}▏（回车确认，Esc 取消）`)
+    ? h(Text, { color: theme.colors.info }, `搜索：${query}▏（回车确认，Esc 取消）`)
     : h(Text, { dimColor: true }, hint || DEFAULT_HINT);
 
   return h(
@@ -312,25 +328,70 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     h(
       Box,
       { flexDirection: "row", justifyContent: "space-between" },
-      h(Text, { color: TONE.accent, bold: true }, " netfix "),
+      h(Text, { color: theme.colors.accent, bold: true }, " netfix "),
       h(Text, { dimColor: true }, "代理与内网诊断工具"),
       right,
     ),
-    h(Box, { flexDirection: "row", justifyContent: "space-between" }, tabs, h(Text, { dimColor: true }, "")),
-    h(Box, { flexDirection: "column", flexGrow: 1, overflow: "hidden" }, h(PanelComponent, panelProps)),
+    h(Tabs, { items: PANELS, activeId: panel }),
+    h(
+      Box,
+      { flexDirection: "column", flexGrow: 1, overflow: "hidden" },
+      h(PanelComponent, panelProps),
+    ),
     h(Box, { flexDirection: "column" }, help, h(Text, { dimColor: true }, " ")),
   );
 }
 
-/** 启动图形界面 */
+/**
+ * 启动图形界面。
+ * 先询问终端背景色确定主题，再开始渲染。
+ */
 export async function runTui(options = {}) {
+  const unicode = detectUnicode();
+  const scheme = themeFromEnv() ?? (await queryTerminalColorScheme());
+  const theme = getTheme(scheme ?? "dark");
+
   // 调试模式：每帧以纯文本追加输出，方便在没有终端模拟器时观察界面内容。
   const debug = process.env.NETFIX_TUI_DEBUG === "1";
-  const instance = render(h(App, options), {
-    alternateScreen: !debug,
-    debug,
-    exitOnCtrlC: true,
-  });
+  const instance = render(
+    h(ThemeProvider, { theme, unicode }, h(App, options)),
+    {
+      alternateScreen: !debug,
+      debug,
+      exitOnCtrlC: true,
+    },
+  );
   await instance.waitUntilExit();
   return 0;
+}
+
+/**
+ * 非交互环境（管道、CI）下输出纯文本总览。
+ * 没有 TTY 时 ink 的交互界面无法启动，退化成一份可直接阅读的文本。
+ */
+export async function renderStaticSummary(options = {}) {
+  const unicode = detectUnicode();
+  const theme = getTheme(themeFromEnv() ?? "dark");
+  const state = await collectState({
+    internalDns: options.internalDns,
+    repoRoots: options.repoRoots ?? [],
+    includeChrome: options.includeChrome ?? false,
+  });
+
+  const width = Math.min(process.stdout.columns || 100, 110);
+  const head = renderToString(
+    h(ThemeProvider, { theme, unicode }, h(OverviewPanel, { state, width })),
+  );
+
+  const nameWidth = Math.max(
+    20,
+    ...state.internalDomains.map((d) => d.name.length),
+  );
+  const domains = state.internalDomains.length
+    ? state.internalDomains
+        .map((d) => `  ${d.name.padEnd(nameWidth)}  ${d.ips.join(", ")}`)
+        .join("\n")
+    : "  （无）";
+
+  return `${head}\n内网域名\n${domains}\n`;
 }

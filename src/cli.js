@@ -730,8 +730,18 @@ export async function main(argv) {
 
   if (!cmd || cmd === "tui" || cmd === "ui") {
     if (!process.stdout.isTTY) {
-      console.error("图形界面需要交互式终端；请改用 netfix doctor 或 netfix scan。");
-      return 1;
+      // 没有交互式终端时退化成纯文本输出，方便在管道里看状态。
+      const { renderStaticSummary } = await import("./tui/app.js");
+      console.log(
+        await renderStaticSummary({
+          internalDns: args.flags["internal-dns"] || DEFAULT_INTERNAL_DNS,
+          repoRoots: args.flags.repos
+            ? String(args.flags.repos).split(",").map((s) => s.trim()).filter(Boolean)
+            : [],
+          includeChrome: args.flags["no-chrome"] !== true,
+        }),
+      );
+      return 0;
     }
     const { runTui } = await import("./tui/app.js");
     return await runTui({

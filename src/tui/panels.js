@@ -2,9 +2,9 @@
 // 由 app.js 统一传入状态、终端宽度和滚动位置。
 
 import { Box, Text } from "ink";
-import { h, Section, KV, Badge } from "./ui.js";
-import { TONE, SYMBOLS } from "./theme.js";
-import { padEnd, truncate } from "./width.js";
+import { h, Section, Badge, Card, kv, txt, useTheme, useUnicode } from "./ui.js";
+import { padEnd, truncate, wrapText } from "./width.js";
+import { symbolSet } from "./theme.js";
 
 export const PANELS = [
   { id: "overview", name: "总览", key: "1" },
@@ -22,122 +22,137 @@ function columnsFor(width, ratio) {
 }
 
 export function OverviewPanel({ state, width }) {
-  const core = state.core;
-  const side = state.sidecar;
-  const sys = state.systemProxy;
+  const theme = useTheme();
+  const symbols = symbolSet(useUnicode());
+
+  /** 状态徽标片段 */
+  const badge = (tone, text) => {
+    const symbol = symbols[tone];
+    const color = theme.colors[tone] ?? theme.colors.info;
+    if (!symbol) return txt(text ?? "", { color, dim: true });
+    return txt(text ? `${symbol} ${text}` : symbol, { color });
+  };
 
   const coreRows = [];
-  if (core.reachable) {
+  if (state.core.reachable) {
     coreRows.push(
-      h(KV, { key: "a", label: "客户端", value: state.frontend?.label ?? "未知" }),
-      h(KV, {
-        key: "b",
-        label: "内核版本",
-        value: `${core.version ?? "未知"}  ${core.mode ?? "-"} 模式`,
-      }),
-      h(KV, {
-        key: "c",
-        label: "混合端口",
-        value: core.mixedPort ? String(core.mixedPort) : "未开放",
-        tone: core.mixedPort ? undefined : TONE.muted,
-      }),
-      h(KV, {
-        key: "d",
-        label: "TUN 模式",
-        value: core.tun
-          ? h(Badge, { tone: "ok" }, "已开启")
-          : h(Text, null, h(Badge, { tone: "warn" }, "已关闭"), " 只有完全忽略代理的程序才需要它"),
-      }),
+      kv("客户端", [txt(state.frontend?.label ?? "未知")]),
+      kv("内核版本", [txt(`${state.core.version ?? "未知"}  ${state.core.mode ?? "-"} 模式`)]),
+      kv("混合端口", [
+        state.core.mixedPort
+          ? txt(String(state.core.mixedPort))
+          : txt("未开放", { color: theme.colors.muted }),
+      ]),
+      kv("TUN 模式", [
+        badge(state.core.tun ? "ok" : "warn", state.core.tun ? "已开启" : "已关闭"),
+      ]),
     );
+    if (!state.core.tun) {
+      coreRows.push([txt("  只有完全忽略代理的程序才需要它", { dim: true })]);
+    }
   } else {
-    coreRows.push(h(KV, { key: "a", label: "状态", value: h(Badge, { tone: "bad" }, "内核不可达") }));
-    for (const [i, e] of state.errors.slice(0, 3).entries()) {
-      coreRows.push(h(KV, { key: `e${i}`, label: "", value: e, tone: TONE.bad }));
+    coreRows.push(kv("状态", [badge("bad", "内核不可达")]));
+    for (const e of state.errors.slice(0, 3)) {
+      coreRows.push(kv("", [txt(e, { color: theme.colors.bad })]));
     }
   }
 
-  if (sys) {
+  if (state.systemProxy) {
+    const sys = state.systemProxy;
     coreRows.push(
-      h(KV, {
-        key: "s",
-        label: "系统代理",
-        value:
-          sys.httpEnabled && sys.httpsEnabled
-            ? h(Badge, { tone: "ok" }, `已启用 ${sys.host}:${sys.port}`)
-            : h(Badge, { tone: "warn" }, "未启用"),
-      }),
+      kv("系统代理", [
+        sys.httpEnabled && sys.httpsEnabled
+          ? badge("ok", `已启用 ${sys.host}:${sys.port}`)
+          : badge("warn", "未启用"),
+      ]),
     );
   }
 
+  const side = state.sidecar;
   const sideRows = [
-    h(KV, {
-      key: "r",
-      label: "转发服务",
-      value: side.running
-        ? h(Badge, { tone: "ok" }, `运行中 (pid ${side.pid})`)
-        : h(Badge, { tone: "warn" }, "未运行"),
-    }),
-    h(KV, {
-      key: "h",
-      label: "  HTTP",
-      value: side.httpOpen
-        ? h(Badge, { tone: "ok" }, `127.0.0.1:${side.httpPort}`)
-        : h(Badge, { tone: "muted" }, "未监听"),
-    }),
-    h(KV, {
-      key: "o",
-      label: "  SOCKS5",
-      value: side.socksOpen
-        ? h(Badge, { tone: "ok" }, `127.0.0.1:${side.socksPort}`)
-        : h(Badge, { tone: "muted" }, "未监听"),
-    }),
+    kv("转发服务", [
+      side.running ? badge("ok", `运行中 (pid ${side.pid})`) : badge("warn", "未运行"),
+    ]),
+    kv("  HTTP", [
+      side.httpOpen
+        ? badge("ok", `127.0.0.1:${side.httpPort}`)
+        : badge("muted", "未监听"),
+    ]),
+    kv("  SOCKS5", [
+      side.socksOpen
+        ? badge("ok", `127.0.0.1:${side.socksPort}`)
+        : badge("muted", "未监听"),
+    ]),
   ];
 
   const loading = state.loading;
   const summaryRows = [
-    h(KV, {
-      key: "i",
-      label: "内网域名",
-      value: loading
-        ? "扫描中…"
-        : h(Text, null, h(Text, { bold: true }, String(state.internalDomains.length)), " 个解析到私网地址"),
-    }),
-    h(KV, { key: "p", label: "公网域名", value: loading ? "—" : `${state.publicCount} 个` }),
-    h(KV, { key: "f", label: "仍为假 IP", value: loading ? "—" : `${state.fakeCount} 个` }),
-    h(KV, { key: "u", label: "无法解析", value: loading ? "—" : `${state.unresolvedCount} 个` }),
-    h(KV, {
-      key: "s",
-      label: "归并后缀",
-      value: loading
-        ? "—"
+    kv("内网域名", [
+      loading
+        ? txt("扫描中…", { dim: true })
+        : txt(String(state.internalDomains.length), { bold: true }),
+      loading ? null : txt(" 个解析到私网地址"),
+    ].filter(Boolean)),
+    kv("公网域名", [txt(loading ? "—" : `${state.publicCount} 个`)]),
+    kv("仍为假 IP", [txt(loading ? "—" : `${state.fakeCount} 个`)]),
+    kv("无法解析", [txt(loading ? "—" : `${state.unresolvedCount} 个`)]),
+    kv(
+      "归并后缀",
+      loading
+        ? [txt("—")]
         : state.suffixes.length
-          ? state.suffixes.flatMap((s, i) => [
-              i > 0 ? h(Text, { key: `sep${s}`, dimColor: true }, "、") : null,
-              h(Text, { key: s, color: TONE.info }, s),
-            ])
-          : "无",
-    }),
+          ? state.suffixes.flatMap((suffix, i) => [
+              i > 0 ? txt("、", { dim: true }) : null,
+              txt(suffix, { color: theme.colors.info }),
+            ]).filter(Boolean)
+          : [txt("无")],
+    ),
   ];
+
+  // 提示可能很长，在卡片里按显示宽度换行，不截断
+  const noteRows = state.notes?.length
+    ? state.notes.slice(0, 3).flatMap((note) => {
+        const lines = wrapText(note.replace(/\n/g, " "), cardWidth - 6);
+        return lines.map((text, i) =>
+          i === 0 ? [txt("  "), badge("warn", text)] : [txt("    " + text)],
+        );
+      })
+    : null;
+
+  const cardWidth = Math.min(width, 74);
+  // 宽终端下把「代理内核」和「转发服务」并排放，避免右边空一大片
+  const twoColumn = width >= 96;
+
+  // 并排的两张卡片高度要一致，否则右边的框会在半空中收尾
+  const height = Math.max(coreRows.length, sideRows.length);
+  const pad = (rows) => [...rows, ...Array.from({ length: height - rows.length }, () => [])];
+  const coreCardRows = pad(coreRows);
+  const sideCardRows = pad(sideRows);
 
   return h(
     Box,
     { flexDirection: "column" },
-    h(Section, { title: "代理内核" }, coreRows),
-    h(Section, { title: "转发服务" }, sideRows),
-    h(Section, { title: "内网概况" }, summaryRows),
-    state.notes?.length
+    twoColumn
       ? h(
-          Section,
-          { title: "提示" },
-          state.notes.slice(0, 3).map((n, i) =>
-            h(Text, { key: i }, `  `, h(Badge, { tone: "warn" }, n)),
-          ),
+          Box,
+          { flexDirection: "row", gap: 1 },
+          h(Card, { title: "代理内核", width: 48, rows: coreCardRows }),
+          h(Card, { title: "转发服务", width: 40, rows: sideCardRows }),
         )
-      : null,
+      : h(
+          Box,
+          { flexDirection: "column" },
+          h(Card, { title: "代理内核", width: cardWidth, rows: coreRows }),
+          h(Card, { title: "转发服务", width: cardWidth, rows: sideRows }),
+        ),
+    h(Card, { title: "内网概况", width: cardWidth, rows: summaryRows }),
+    noteRows ? h(Card, { title: "提示", width: cardWidth, rows: noteRows }) : null,
   );
 }
 
 export function DomainsPanel({ state, width, scroll, height, query }) {
+  const theme = useTheme();
+
   if (state.loading) {
     return h(Box, { flexDirection: "column" }, h(Text, { dimColor: true }, "  正在扫描并解析…"));
   }
@@ -151,7 +166,11 @@ export function DomainsPanel({ state, width, scroll, height, query }) {
     return h(
       Box,
       { flexDirection: "column" },
-      h(Text, { dimColor: true }, query ? `  没有匹配「${query}」的域名` : "  未发现解析到私网地址的域名"),
+      h(
+        Text,
+        { dimColor: true },
+        query ? `  没有匹配「${query}」的域名` : "  未发现解析到私网地址的域名",
+      ),
     );
   }
 
@@ -170,9 +189,9 @@ export function DomainsPanel({ state, width, scroll, height, query }) {
     h(
       Text,
       { key: d.name },
-      `  `,
-      h(Text, { color: TONE.text }, padEnd(truncate(d.name, nameWidth), nameWidth)),
-      h(Text, { color: TONE.info }, padEnd(truncate(d.ips.join(", "), ipWidth), ipWidth)),
+      "  ",
+      h(Text, { color: theme.colors.text }, padEnd(truncate(d.name, nameWidth), nameWidth)),
+      h(Text, { color: theme.colors.info }, padEnd(truncate(d.ips.join(", "), ipWidth), ipWidth)),
       h(Badge, { tone: "ok" }, "私网"),
     ),
   );
@@ -183,26 +202,20 @@ export function DomainsPanel({ state, width, scroll, height, query }) {
     header,
     ...body,
     rows.length > slice.length || start > 0
-      ? h(
-          Text,
-          { dimColor: true },
-          `  显示 ${start + 1}-${start + slice.length} / ${rows.length}`,
-        )
+      ? h(Text, { dimColor: true }, `  显示 ${start + 1}-${start + slice.length} / ${rows.length}`)
       : null,
   );
 }
 
 export function ProcessesPanel({ state, scroll, height }) {
+  const theme = useTheme();
+
   if (!state.processes.length) {
     return h(Box, { flexDirection: "column" }, h(Text, { dimColor: true }, "  未发现相关进程"));
   }
 
   const nameWidth = 52;
-  const header = h(
-    Text,
-    { dimColor: true },
-    `  ${padEnd("程序", nameWidth)}代理能力`,
-  );
+  const header = h(Text, { dimColor: true }, `  ${padEnd("程序", nameWidth)}代理能力`);
 
   const visible = Math.max(1, height - 3);
   const start = Math.min(scroll, Math.max(0, state.processes.length - visible));
@@ -214,8 +227,8 @@ export function ProcessesPanel({ state, scroll, height }) {
     return h(
       Text,
       { key: `${p.pid}-${p.comm}` },
-      `  `,
-      h(Text, { color: TONE.text }, padEnd(truncate(p.comm, nameWidth - 1), nameWidth)),
+      "  ",
+      h(Text, { color: theme.colors.text }, padEnd(truncate(p.comm, nameWidth - 1), nameWidth)),
       h(Badge, { tone }, label),
     );
   });
@@ -242,11 +255,13 @@ export function ProcessesPanel({ state, scroll, height }) {
 }
 
 export function RoutesPanel({ state }) {
+  const theme = useTheme();
+
   const suffixRows = state.loading
     ? [h(Text, { key: "l", dimColor: true }, "    扫描中…")]
     : state.suffixes.length
       ? state.suffixes.map((s) =>
-          h(Text, { key: s }, "    ", h(Text, { color: TONE.info }, "+." + s)),
+          h(Text, { key: s }, "    ", h(Text, { color: theme.colors.info }, "+." + s)),
         )
       : [h(Text, { key: "n", dimColor: true }, "    无")];
 
@@ -255,10 +270,24 @@ export function RoutesPanel({ state }) {
     { flexDirection: "column" },
     h(Text, { dimColor: true }, "  netfix proxy 依据此表决定目标走直连还是走内核"),
     "",
-    h(Text, null, "  ", h(Text, { bold: true }, "内网后缀"), "  ", h(Text, { dimColor: true }, "(直连，不经过代理)")),
+    h(
+      Text,
+      null,
+      "  ",
+      h(Text, { bold: true }, "内网后缀"),
+      "  ",
+      h(Text, { dimColor: true }, "(直连，不经过代理)"),
+    ),
     ...suffixRows,
     "",
-    h(Text, null, "  ", h(Text, { bold: true }, "其他域名"), "  ", h(Text, { dimColor: true }, "(转交内核 7897 端口)")),
+    h(
+      Text,
+      null,
+      "  ",
+      h(Text, { bold: true }, "其他域名"),
+      "  ",
+      h(Text, { dimColor: true }, "(转交内核 7897 端口)"),
+    ),
     h(Text, { dimColor: true }, "    *"),
     h(Section, { title: "提示" }, [
       h(Text, { key: "t", dimColor: true }, "  内网域名不会进入代理，因此不会拿到假 IP 地址。"),
@@ -270,7 +299,6 @@ export function EventsPanel({ events }) {
   if (!events.length) {
     return h(Box, { flexDirection: "column" }, h(Text, { dimColor: true }, "  暂无操作记录"));
   }
-  const tone = { ok: "ok", warn: "warn", bad: "bad", info: "info" };
   return h(
     Box,
     { flexDirection: "column" },
@@ -284,12 +312,10 @@ export function EventsPanel({ events }) {
           "  ",
           h(Text, { dimColor: true }, e.time),
           " ",
-          h(Badge, { tone: tone[e.kind] ?? "info" }),
+          h(Badge, { tone: e.kind === "muted" ? "info" : e.kind }),
           " ",
           e.text,
         ),
       ),
   );
 }
-
-export { SYMBOLS };
