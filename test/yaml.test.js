@@ -8,7 +8,7 @@ import {
 } from "../src/core/yaml.js";
 import { buildDnsSection } from "../src/core/plan.js";
 
-test("yaml round-trips a netfix generated dns section", () => {
+test("yaml round-trips a tunless generated dns section", () => {
   const dns = buildDnsSection({
     internalDns: "10.249.150.130",
     internalSuffixes: ["17usoft.com", "cdb.17usoft.com"],

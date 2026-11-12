@@ -1,10 +1,10 @@
 {
-  "name": "netfix",
+  "name": "tunless",
   "version": "0.1.0",
-  "description": "Diagnose and fix macOS proxy/DNS misconfiguration: give proxy-aware tools a working proxy and keep internal split-horizon domains off the proxy",
+  "description": "Run AI agents without TUN mode: give proxy-blind tools a working local proxy and keep split-horizon internal domains off the proxy",
   "type": "module",
   "bin": {
-    "netfix": "./bin/netfix.js"
+    "tunless": "./bin/tunless.js"
   },
   "engines": {
     "node": ">=22"
@@ -22,14 +22,19 @@
     "test": "node --test \"test/*.test.js\""
   },
   "keywords": [
+    "tun",
+    "tun-mode",
     "proxy",
-    "dns",
-    "mihomo",
+    "agent",
+    "ai-agent",
     "clash",
     "clash-verge",
+    "mihomo",
     "split-horizon",
-    "tun",
-    "macos"
+    "dns",
+    "macos",
+    "antigravity",
+    "cursor"
   ],
   "license": "MIT",
   "publishConfig": {

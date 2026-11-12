@@ -111,7 +111,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     log("正在启动转发服务…", "info");
     await exec(
       "launchctl",
-      ["kickstart", "-k", `gui/${process.getuid?.() ?? 501}/dev.netfix.proxy`],
+      ["kickstart", "-k", `gui/${process.getuid?.() ?? 501}/dev.tunless.proxy`],
       { timeout: 15000 },
     ).catch((err) => {
       throw new Error(`启动失败：${err.message}`);
@@ -122,7 +122,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
 
   const runService = useCallback(async () => {
     log("正在切换转发服务状态…", "info");
-    const domain = `gui/${process.getuid?.() ?? 501}/dev.netfix.proxy`;
+    const domain = `gui/${process.getuid?.() ?? 501}/dev.tunless.proxy`;
     if (!state.sidecar.installed) {
       // 还没装成 launchd 服务，先装上（装完自动启动）
       const { cmdService, setQuiet } = await import("../cli.js");
@@ -141,7 +141,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
 
   const runLaunch = useCallback(async () => {
     const app = "Antigravity";
-    log(`正在以 netfix 代理重启 ${app}…`, "info");
+    log(`正在以 tunless 代理重启 ${app}…`, "info");
     const { cmdLaunch, setQuiet } = await import("../cli.js");
     setQuiet(true);
     await cmdLaunch(
@@ -344,8 +344,8 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     h(
       Box,
       { flexDirection: "row", justifyContent: "space-between" },
-      h(Text, { color: theme.colors.accent, bold: true }, " netfix "),
-      h(Text, { dimColor: true }, "代理与内网诊断工具 · 不知道从哪开始就看第 6 个面板"),
+      h(Text, { color: theme.colors.accent, bold: true }, " tunless "),
+      h(Text, { dimColor: true }, "Agent 免 TUN 联网 · 不知道从哪开始就按 2 看用法"),
       right,
     ),
     h(Tabs, { items: PANELS, activeId: panel }),
@@ -368,7 +368,7 @@ export async function runTui(options = {}) {
   const theme = getTheme(scheme ?? "dark");
 
   // 调试模式：每帧以纯文本追加输出，方便在没有终端模拟器时观察界面内容。
-  const debug = process.env.NETFIX_TUI_DEBUG === "1";
+  const debug = process.env.TUNLESS_TUI_DEBUG === "1";
   const instance = render(
     h(ThemeProvider, { theme, unicode }, h(App, options)),
     {

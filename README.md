@@ -1,32 +1,40 @@
-# netfix
+# tunless
 
-诊断并修复 macOS 上两类代理问题：
+**让 AI Agent 不用开 TUN 也能联网。**
 
-1. **工具连不上代理网络** —— 程序不读系统代理，也没有 `HTTPS_PROXY` 支持，只能开 TUN。
-2. **内网域名解析到公网 IP** —— 代理内核给内网域名发了假 IP 或公网答案，工具连错服务器。
+不少 Agent 工具（Antigravity、Cursor、各类 CLI Agent）只认 `HTTPS_PROXY` 环境变量，
+不读 macOS 系统代理。于是「Clash Verge 明明开着，它就是连不上」，很多人只能去开 TUN 模式。
+而 TUN 一开，内网域名也会被代理内核接管，公司内网反而连不上了。
 
-netfix 与具体客户端无关：它通过 REST 接口跟任何运行中的 [mihomo](https://github.com/MetaCubeX/mihomo) 内核通信，并为 Clash Verge Rev 提供适配器，把配置写进订阅更新后仍保留的 merge 增强层。
+tunless 把这两件事分开：
+
+1. 起一个本地转发代理（HTTP `127.0.0.1:8899` / SOCKS5 `127.0.0.1:8898`），
+   把请求交给已运行的 Clash／mihomo 内核 —— Agent 只要认 `HTTPS_PROXY` 就能用，**不需要 TUN**；
+2. 让内网域名（如 `matrix.17usoft.com`）走直连，不被代理发假 IP 或公网地址。
+
+与具体客户端无关：tunless 通过 REST 接口跟任何运行中的 [mihomo](https://github.com/MetaCubeX/mihomo)
+内核通信，并为 Clash Verge Rev 提供适配器，配置写进订阅更新后仍保留的 merge 增强层。
 
 核心逻辑零运行时依赖 —— 诊断、DNS 探测、配置读写全部只用 Node 内置模块。
-图形界面基于 [ink](https://github.com/vadimdemedes/ink) + React 构建（唯一的两个依赖），源码即运行，不需要编译步骤。
+图形界面基于 [ink](https://github.com/vadimdemedes/ink) + React 构建（唯一的两个依赖），
+源码即运行，不需要编译步骤。
 
 ## 这是什么，给谁用
 
-一句话：**给「只认 `HTTPS_PROXY`、不读 macOS 系统代理」的工具准备一个能用的代理，并保证公司内网域名不走代理。**
+一句话：**让那些「不读系统代理、只能靠 TUN 才能联网」的 Agent 工具，不用开 TUN 也能联网。**
 
-典型例子是 **Antigravity**（VS Code 系 AI 编辑器）。它的进程不读系统代理，也不认 `HTTPS_PROXY` 环境变量，所以「Clash Verge 明明开着，它就是连不上」。netfix 做两件事：
-
-1. 起一个本地转发代理（HTTP `127.0.0.1:8899`、SOCKS5 `127.0.0.1:8898`），把请求交给 Clash 内核；
-2. 让内网域名（如 `matrix.17usoft.com`）走直连，不被代理内核发假 IP 或公网地址。
+典型例子是 **Antigravity**（VS Code 系 AI 编辑器）和各类 CLI Agent。它们要么只认 `HTTPS_PROXY`，
+要么完全忽略代理设置。后一种过去只能靠 TUN，但 TUN 会把内网域名也劫持走。打开 tunless 的界面，
+它会告诉你当前机器上哪些程序能走代理、哪些必须靠转发，以及该按哪个键处理。
 
 ## 30 秒上手
 
 界面里按 `2` 或 `h` 可以随时看到这一页。命令行等价物：
 
 ```bash
-netfix doctor             # 1. 先诊断，看当前有什么问题
-netfix service install    # 2. 安装并启动转发服务（开机自启，监听 127.0.0.1:8899）
-netfix launch Antigravity # 3. 用这个代理重启 Antigravity
+tunless doctor             # 1. 先诊断，看当前有什么问题
+tunless service install    # 2. 安装并启动转发服务（开机自启，监听 127.0.0.1:8899）
+tunless launch Antigravity # 3. 用这个代理重启 Antigravity
 ```
 
 第 3 步等价于给应用加上这两个环境变量后再启动它：
@@ -35,14 +43,14 @@ netfix launch Antigravity # 3. 用这个代理重启 Antigravity
 HTTPS_PROXY=http://127.0.0.1:8899 HTTP_PROXY=http://127.0.0.1:8899 Antigravity
 ```
 
-不想用 `netfix launch` 的话，在应用自己的代理设置里填 **协议 HTTP、地址 127.0.0.1、端口 8899** 即可。
+不想用 `tunless launch` 的话，在应用自己的代理设置里填 **协议 HTTP、地址 127.0.0.1、端口 8899** 即可。
 
-停止转发服务用 `netfix service stop`，查看状态用 `netfix service status`，看日志用 `netfix service logs`。
+停止转发服务用 `tunless service stop`，查看状态用 `tunless service status`，看日志用 `tunless service logs`。
 
 **内网域名解析不对时**（比如 `matrix.17usoft.com` 变成了公网 IP）：
 
 ```bash
-netfix fix             # 生成方案 → 预览差异 → 确认 → 应用 → 校验，失败自动回滚
+tunless fix             # 生成方案 → 预览差异 → 确认 → 应用 → 校验，失败自动回滚
 ```
 
 ### 什么时候才需要开 TUN
@@ -60,33 +68,33 @@ macOS 会保护 `~/Library/Application Support/Google/Chrome/.../History`。想�
 ## 安装
 
 ```bash
-git clone <本仓库> ~/github/netfix
-cd ~/github/netfix && npm install      # 只装 ink 与 react
+git clone <本仓库> ~/github/tunless
+cd ~/github/tunless && npm install      # 只装 ink 与 react
 mkdir -p ~/.local/bin
-ln -sf ~/github/netfix/bin/netfix.js ~/.local/bin/netfix
-chmod +x ~/github/netfix/bin/netfix.js
+ln -sf ~/github/tunless/bin/tunless.js ~/.local/bin/tunless
+chmod +x ~/github/tunless/bin/tunless.js
 ```
 
 `~/.local/bin` 需在 `PATH` 中。
 
 ## 用法
 
-直接运行 `netfix` 会打开图形界面：
+直接运行 `tunless` 会打开图形界面：
 
 ```bash
-netfix                 # 图形界面（TUI）
-netfix doctor          # 只诊断，不修改任何东西
-netfix scan            # 列出候选域名及其解析结果
-netfix fix             # 方案 → 预览差异 → 确认 → 应用 → 校验 → 失败自动回滚
-netfix proxy           # 启动本地转发代理，把代理能力交给工具
-netfix launch <应用>    # 带代理环境重启某个应用
-netfix service <操作>   # install | uninstall | status | logs
+tunless                 # 图形界面（TUI）
+tunless doctor          # 只诊断，不修改任何东西
+tunless scan            # 列出候选域名及其解析结果
+tunless fix             # 方案 → 预览差异 → 确认 → 应用 → 校验 → 失败自动回滚
+tunless proxy           # 启动本地转发代理，把代理能力交给工具
+tunless launch <应用>    # 带代理环境重启某个应用
+tunless service <操作>   # install | uninstall | status | logs
 ```
 
 ### 图形界面
 
 ```
- netfix      代理与内网诊断工具                 更新于 20:51:55
+ tunless      代理与内网诊断工具                 更新于 20:51:55
  1 总览  2 怎么用  3 内网域名  4 程序代理能力  5 分流规则  6 操作日志
 
 ╭────────────────────────────────────────────────────────────╮
@@ -115,7 +123,7 @@ netfix service <操作>   # install | uninstall | status | logs
 | `f` | 一键修复（写入配置并校验） |
 | `p` | 启动转发服务 |
 | `S` | 启停转发服务 |
-| `l` | 用 netfix 代理重启应用 |
+| `l` | 用 tunless 代理重启应用 |
 | `j` / `k`、↑ / ↓ | 列表上下滚动 |
 | `PgUp` / `PgDn` | 列表翻页 |
 | `/` | 在内网域名面板里按名字过滤（回车确认，Esc 取消） |
@@ -125,8 +133,8 @@ netfix service <操作>   # install | uninstall | status | logs
 
 几个细节：
 
-- **亮暗自适应**：启动时用 OSC 11 问一次终端背景色，亮底用深色字，暗底用浅色字。`NETFIX_THEME=light|dark` 可以强制指定。
-- **ASCII 降级**：终端不是 UTF-8 时（`LC_ALL=C`）符号与边框自动换成 `+ - |`，不会出现方块。`NETFIX_ASCII=1` 可强制降级。
+- **亮暗自适应**：启动时用 OSC 11 问一次终端背景色，亮底用深色字，暗底用浅色字。`TUNLESS_THEME=light|dark` 可以强制指定。
+- **ASCII 降级**：终端不是 UTF-8 时（`LC_ALL=C`）符号与边框自动换成 `+ - |`，不会出现方块。`TUNLESS_ASCII=1` 可强制降级。
 - **非交互环境**：输出重定向到管道时不会报错，而是打印一份纯文本总览。
 
 ### 选项
@@ -158,7 +166,7 @@ DNS 查询是手写的 UDP 报文（`node:dgram`）——TUN 开启时 `dns.Reso
    - **通用 mihomo** → 直接改配置文件，再用 `PUT /configs?force=true` 热重载。
 5. 校验：重新解析每个内网域名，确认仍落在私网地址；失败自动从备份恢复。
 
-改动前会备份到 `~/.netfix/backups/<时间戳>/`。
+改动前会备份到 `~/.tunless/backups/<时间戳>/`。
 
 ### 后缀安全
 
@@ -166,14 +174,14 @@ DNS 查询是手写的 UDP 报文（`node:dgram`）——TUN 开启时 `dns.Reso
 
 反之，父域本身没有 A 记录（内网区的常见形态）时，归并是安全的。
 
-## `netfix proxy` —— 给不认系统代理的工具发代理
+## `tunless proxy` —— 给不认系统代理的工具发代理
 
 很多工具（Electron 应用、部分 CLI、IDE 插件）从不读取 macOS 系统代理，常见做法是「开 TUN」。TUN 会接管整台机器，笨重且容易搞坏内网。
 
-`netfix proxy` 是更轻的替代：一个本地正向代理，坐在工具和运行中的 mihomo 内核之间。
+`tunless proxy` 是更轻的替代：一个本地正向代理，坐在工具和运行中的 mihomo 内核之间。
 
 ```bash
-netfix proxy
+tunless proxy
 #   HTTP 代理 ：http://127.0.0.1:8899
 #   SOCKS5 代理：socks5://127.0.0.1:8898
 
@@ -190,7 +198,7 @@ export NO_PROXY=17usoft.com,17u.cn
 | 内网域名（命中内网后缀表） | 走内网 DNS 解析，直连私网地址，**不经过代理** |
 | 其他所有域名 | 隧道给内核的混合端口 |
 
-内网后缀表来自正在使用的客户端配置（`nameserver-policy` 的键）加上实时扫描，因此 `netfix proxy` 会自动继承 `netfix fix` 已经配好的结果——代理信息从运行中的内核读取，不写死。
+内网后缀表来自正在使用的客户端配置（`nameserver-policy` 的键）加上实时扫描，因此 `tunless proxy` 会自动继承 `tunless fix` 已经配好的结果——代理信息从运行中的内核读取，不写死。
 
 ### 常用参数
 
@@ -205,26 +213,26 @@ export NO_PROXY=17usoft.com,17u.cn
 ### 常驻运行
 
 ```bash
-netfix service install     # 开机自启，崩溃自动拉起
-netfix service status
-netfix service logs
-netfix service uninstall
+tunless service install     # 开机自启，崩溃自动拉起
+tunless service status
+tunless service logs
+tunless service uninstall
 ```
 
 ### 用代理重启某个工具
 
 ```bash
-netfix launch Antigravity
-netfix launch Cursor --print-env     # 只看会注入什么
+tunless launch Antigravity
+tunless launch Cursor --print-env     # 只看会注入什么
 ```
 
 先退出旧实例（否则旧环境会存活），再通过 `open --env` 重新拉起。
 
-注意：部分应用会通过登录 shell 拉起子进程，从而重新读取 `~/.zshrc`。若你的 shell 自己导出了 `NO_PROXY`，子进程可能拿到 shell 里的那份列表而非注入的那份。只要 shell 的列表也包含内网域名就无害；即使内网域名真的走到 netfix，分流判定也依然正确。
+注意：部分应用会通过登录 shell 拉起子进程，从而重新读取 `~/.zshrc`。若你的 shell 自己导出了 `NO_PROXY`，子进程可能拿到 shell 里的那份列表而非注入的那份。只要 shell 的列表也包含内网域名就无害；即使内网域名真的走到 tunless，分流判定也依然正确。
 
 ## 程序代理能力
 
-`netfix doctor` 会检查运行中的程序是否认可 `HTTPS_PROXY`。Go 的 `net/http` 通过 `golang.org/x/net/http/httpproxy` 读取环境变量，因此二进制中存在该符号即可判定支持。不支持的程序需要 TUN 模式（或单独配置 SOCKS 代理）才能访问代理网络。
+`tunless doctor` 会检查运行中的程序是否认可 `HTTPS_PROXY`。Go 的 `net/http` 通过 `golang.org/x/net/http/httpproxy` 读取环境变量，因此二进制中存在该符号即可判定支持。不支持的程序需要 TUN 模式（或单独配置 SOCKS 代理）才能访问代理网络。
 
 ## 开发
 
@@ -236,4 +244,4 @@ npm test        # node --test，无需网络
 
 - 仅支持 macOS（依赖 `scutil`、`osascript`、`strings`、`pkill`）。
 - Chrome 历史需要「完全磁盘访问权限」，未授权时自动降级。
-- netfix 不会修改你的 shell 配置文件 —— 代理提示只打印出来，由你决定是否采用。
+- tunless 不会修改你的 shell 配置文件 —— 代理提示只打印出来，由你决定是否采用。

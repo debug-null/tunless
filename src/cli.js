@@ -8,6 +8,7 @@ import readline from "node:readline";
 import { probeApi } from "./core/api.js";
 import { discoverAll, systemProxyState } from "./core/discover.js";
 import { classifyDomain } from "./core/dns.js";
+import { dataDir } from "./core/paths.js";
 import { scanAll } from "./core/scan.js";
 import { inspectProcesses, proxyAdvice } from "./core/proc.js";
 import {
@@ -109,7 +110,7 @@ async function connect(frontend) {
 }
 
 function backendDir() {
-  return path.join(os.homedir(), ".netfix");
+  return dataDir();
 }
 
 function backupDir() {
@@ -193,7 +194,7 @@ export async function cmdDoctor(args) {
     for (const f of err.failures ?? []) {
       say(dim(`    ${f.candidate.socketPath ? `unix://${f.candidate.socketPath}` : `http://${f.candidate.host}:${f.candidate.port}`}: ${f.error}`));
     }
-    say(dim("    请先启动代理客户端，然后重新运行 netfix doctor"));
+    say(dim("    请先启动代理客户端，然后重新运行 tunless doctor"));
   }
 
   if (api) {
@@ -202,7 +203,7 @@ export async function cmdDoctor(args) {
       const tun = cfg.tun?.enable;
       say(`  ${tun ? ok("TUN mode enabled") : warn("TUN mode disabled")}`);
       if (!tun) {
-        say(dim("    programs that read HTTPS_PROXY/ALL_PROXY are covered by: netfix proxy"));
+        say(dim("    programs that read HTTPS_PROXY/ALL_PROXY are covered by: tunless proxy"));
         say(dim("    programs that ignore the proxy entirely need TUN mode"));
       }
       const mode = cfg.mode;
@@ -242,8 +243,8 @@ export async function cmdDoctor(args) {
   }
 
   say(head("\n── 转发服务 ──"));
-  say(`  ${info("netfix proxy 让工具无需 TUN 也能走代理")}`);
-  say(dim("    netfix proxy            # HTTP 8899 / SOCKS5 8898"));
+  say(`  ${info("tunless proxy 让工具无需 TUN 也能走代理")}`);
+  say(dim("    tunless proxy            # HTTP 8899 / SOCKS5 8898"));
   say(dim("    export HTTPS_PROXY=http://127.0.0.1:8899"));
 
   say(head("\n── 内网域名 ──"));
@@ -267,7 +268,7 @@ export async function cmdDoctor(args) {
       }
       if (missing.length) {
         exitCode = 1;
-        say(`  ${bad(`${missing.length} 个后缀仍是假 IP — 请运行：netfix fix`)}`);
+        say(`  ${bad(`${missing.length} 个后缀仍是假 IP — 请运行：tunless fix`)}`);
         for (const m of missing) say(dim(`    +.${m}`));
       } else {
         say(`  ${ok("所有内网后缀均解析到私网地址")}`);
@@ -345,7 +346,7 @@ export async function cmdProxy(args) {
     repoRoots,
   });
 
-  say(head("\n── netfix proxy ──\n"));
+  say(head("\n── tunless proxy ──\n"));
   say(`  ${info(`上游内核：${upstream.host}:${upstream.port}${coreVersion ? `（mihomo ${coreVersion}）` : ""}`)}`);
   say(`  ${info(`内网域名：${suffixes.length ? suffixes.join("、") : "未检测到"}`)}`);
   say(`  ${ok(`HTTP 代理 ：http://127.0.0.1:${httpPort}`)}`);
@@ -437,7 +438,7 @@ export async function cmdLaunch(args) {
     env.all_proxy = env.ALL_PROXY;
   }
 
-  say(head("\n── netfix 启动应用 ──\n"));
+  say(head("\n── tunless 启动应用 ──\n"));
   say(`  ${info(`应用：${app}`)}`);
   say(`  ${info(`代理：http://127.0.0.1:${httpPort}${socksPort ? ` / socks5://127.0.0.1:${socksPort}` : ""}`)}`);
   say(`  ${dim(`NO_PROXY：${noProxyList}`)}`);
@@ -461,7 +462,7 @@ export async function cmdLaunch(args) {
     openArgs.push("--env", `${key}=${value}`);
   }
   await exec("open", openArgs, { timeout: 15000 });
-  say(`\n  ${ok(`已使用 netfix 代理启动 ${appName}`)}\n`);
+  say(`\n  ${ok(`已使用 tunless 代理启动 ${appName}`)}\n`);
   return 0;
 }
 
@@ -475,8 +476,8 @@ export async function cmdService(args) {
     say(dim(`    ${plist}`));
     const status = await serviceStatus();
     say(`  ${status.running ? ok(`运行中（pid ${status.pid}）`) : warn("尚未运行")}`);
-    say(dim(`    日志：~/.netfix/proxy.log`));
-    say(dim(`    停止：netfix service uninstall\n`));
+    say(dim(`    日志：~/.tunless/proxy.log`));
+    say(dim(`    停止：tunless service uninstall\n`));
     return status.running ? 0 : 1;
   }
 
@@ -488,19 +489,19 @@ export async function cmdService(args) {
 
   if (action === "logs") {
     const text = readServiceLog(40);
-    say(text ? text : dim("  暂无日志 — 用 netfix service install 启动"));
+    say(text ? text : dim("  暂无日志 — 用 tunless service install 启动"));
     return 0;
   }
 
   const status = await serviceStatus();
-  say(head("\n── netfix 服务 ──\n"));
+  say(head("\n── tunless 服务 ──\n"));
   say(`  ${status.installed ? ok("launchd 常驻代理已安装") : warn("尚未安装")} ${dim(status.plist)}`);
   if (status.installed) {
     say(`  ${status.running ? ok(`运行中（pid ${status.pid}）`) : bad("已安装但未运行")}`);
   }
-  say(dim("\n  netfix service install     # 开机自启，崩溃自动拉起"));
-  say(dim("  netfix service uninstall   # 移除它"));
-  say(dim("  netfix service logs\n"));
+  say(dim("\n  tunless service install     # 开机自启，崩溃自动拉起"));
+  say(dim("  tunless service uninstall   # 移除它"));
+  say(dim("  tunless service logs\n"));
   return status.installed && status.running ? 0 : 0;
 }
 
@@ -510,7 +511,7 @@ export async function cmdFix(args) {
   const frontend = await pickFrontend(args);
   const adapter = resolveAdapter(frontend);
 
-  say(head(`\n── netfix 修复（${frontend.label}）──\n`));
+  say(head(`\n── tunless 修复（${frontend.label}）──\n`));
 
   const { file: targetFile } = await adapter.prepare();
   const conn = await connect(frontend);
@@ -685,16 +686,16 @@ function prompt(question) {
 }
 
 export const HELP = `
-${head("netfix")} — 代理与内网 DNS 诊断／修复工具
+${head("tunless")} — 让 Agent 不用开 TUN 也能联网
 
 ${head("用法")}
-  netfix                     启动图形界面（TUI）
-  netfix doctor [选项]       诊断环境、程序与内网域名
-  netfix scan [选项]         列出候选域名及其解析结果
-  netfix fix [选项]          生成方案 → 预览差异 → 确认 → 应用 → 校验
-  netfix proxy [选项]        启动本地转发代理，把代理能力交给工具
-  netfix launch [应用]       带代理环境重启某个应用
-  netfix service <操作>      install | uninstall | status | logs
+  tunless                     启动图形界面（TUI）
+  tunless doctor [选项]       诊断环境、程序与内网域名
+  tunless scan [选项]         列出候选域名及其解析结果
+  tunless fix [选项]          生成方案 → 预览差异 → 确认 → 应用 → 校验
+  tunless proxy [选项]        启动本地转发代理，把代理能力交给工具
+  tunless launch [应用]       带代理环境重启某个应用
+  tunless service <操作>      install | uninstall | status | logs
 
 ${head("选项")}
   --internal-dns <ip>   内网 DNS 服务器（默认 ${DEFAULT_INTERNAL_DNS}）
@@ -711,12 +712,12 @@ ${head("选项")}
   --help, -h            显示帮助
 
 ${head("示例")}
-  netfix
-  netfix doctor
-  netfix scan --repos ~/company
-  netfix fix --yes
-  netfix proxy
-  netfix launch Antigravity
+  tunless
+  tunless doctor
+  tunless scan --repos ~/company
+  tunless fix --yes
+  tunless proxy
+  tunless launch Antigravity
 `;
 
 export async function main(argv) {
@@ -774,7 +775,7 @@ export async function main(argv) {
     }
   } catch (err) {
     console.error(bad(`\n${err.message}\n`));
-    if (process.env.NETFIX_DEBUG) console.error(err.stack);
+    if (process.env.TUNLESS_DEBUG) console.error(err.stack);
     return 1;
   }
 }

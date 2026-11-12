@@ -1,13 +1,14 @@
 // 首次运行的判断。
 //
 // 第一次用这个工具的人多半不知道从哪开始，所以首次启动直接打开「怎么用」面板；
-// 看过之后在 ~/.netfix/seen 记一笔，之后仍然从总览进入。
+// 看过之后在 ~/.tunless/seen 记一笔，之后仍然从总览进入。
 
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { dataDir } from "../core/paths.js";
 
-const MARKER = path.join(os.homedir(), ".netfix", "seen");
+const MARKER = path.join(dataDir(), "seen");
 
 export function isFirstRun() {
   try {

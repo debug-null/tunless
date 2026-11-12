@@ -281,7 +281,7 @@ export function RoutesPanel({ state }) {
   return h(
     Box,
     { flexDirection: "column" },
-    h(Text, { dimColor: true }, "  netfix proxy 依据此表决定目标走直连还是走内核"),
+    h(Text, { dimColor: true }, "  tunless proxy 依据此表决定目标走直连还是走内核"),
     "",
     h(
       Text,

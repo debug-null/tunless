@@ -6,7 +6,7 @@
 //                    to the private address (never through the upstream proxy)
 //   public host   -> forward the tunnel to the upstream mihomo mixed port
 //
-// The upstream is the running mihomo core; netfix reads its listener from the
+// The upstream is the running mihomo core; tunless reads its listener from the
 // core API, so no proxy credentials or node names are ever handled here.
 
 import net from "node:net";
@@ -374,7 +374,7 @@ export class Socks5Server {
 // one packet, so bytes beyond the requested count must be kept for the next
 // read instead of being dropped.
 function readerState(socket) {
-  if (!socket.__netfixReader) {
+  if (!socket.__tunlessReader) {
     const state = {
       buf: Buffer.alloc(0),
       waiters: [],
@@ -388,13 +388,13 @@ function readerState(socket) {
     state.onEnd = () => {
       for (const waiter of state.waiters.splice(0)) waiter.resolve(null);
     };
-    socket.__netfixReader = state;
+    socket.__tunlessReader = state;
     socket.on("data", state.onData);
     socket.on("end", state.onEnd);
     socket.on("error", state.onEnd);
     socket.on("close", state.onEnd);
   }
-  return socket.__netfixReader;
+  return socket.__tunlessReader;
 }
 
 function flushReader(state) {
@@ -420,13 +420,13 @@ function readBytes(socket, count) {
 
 // Stop consuming data with the reader so the socket can be piped later.
 function releaseReader(socket) {
-  const state = socket.__netfixReader;
+  const state = socket.__tunlessReader;
   if (!state) return;
   socket.off("data", state.onData);
   socket.off("end", state.onEnd);
   socket.off("error", state.onEnd);
   socket.off("close", state.onEnd);
-  socket.__netfixReader = null;
+  socket.__tunlessReader = null;
   socket.pause();
 }
 

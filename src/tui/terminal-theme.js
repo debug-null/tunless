@@ -51,7 +51,7 @@ function hexChannel(hex) {
 export function queryTerminalColorScheme(timeoutMs = 200) {
   const stdin = process.stdin;
   const stdout = process.stdout;
-  if (process.env.NETFIX_TEST === "1") return Promise.resolve(null);
+  if (process.env.TUNLESS_TEST === "1") return Promise.resolve(null);
   if (!stdin.isTTY || !stdout.isTTY || typeof stdin.setRawMode !== "function") {
     return Promise.resolve(null);
   }
@@ -110,8 +110,8 @@ export function queryTerminalColorScheme(timeoutMs = 200) {
   });
 }
 
-/** 环境变量里显式指定主题时优先，NETFIX_THEME=light|dark */
+/** 环境变量里显式指定主题时优先，TUNLESS_THEME=light|dark */
 export function themeFromEnv() {
-  const explicit = process.env.NETFIX_THEME?.trim().toLowerCase();
+  const explicit = process.env.TUNLESS_THEME?.trim().toLowerCase();
   return explicit === "light" || explicit === "dark" ? explicit : null;
 }

@@ -6,13 +6,14 @@ import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { dataDir } from "./paths.js";
 
 const exec = promisify(execFile);
 
-export const LABEL = "dev.netfix.proxy";
+export const LABEL = "dev.tunless.proxy";
 const AGENT_DIR = path.join(os.homedir(), "Library/LaunchAgents");
 export const PLIST_PATH = path.join(AGENT_DIR, `${LABEL}.plist`);
-export const LOG_DIR = path.join(os.homedir(), ".netfix");
+export const LOG_DIR = dataDir();
 
 function guiDomain() {
   return `gui/${process.getuid?.() ?? 501}`;

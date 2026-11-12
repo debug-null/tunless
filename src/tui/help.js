@@ -1,4 +1,4 @@
-// 面向不了解这个项目的人：说明 netfix 是什么、给谁用、怎么用。
+// 面向不了解这个项目的人：说明 tunless 是什么、给谁用、怎么用。
 //
 // 这些内容同时也是 README「怎么用」那一节的来源，避免两边说法不一致。
 
@@ -46,7 +46,7 @@ export function nextSteps(state) {
   if (unsupported.length) {
     steps.push({
       key: "",
-      text: `${unsupported.length} 个运行中的程序不支持代理（比如 ${unsupported[0].comm}），只能靠 netfix 转发，或者开 TUN`,
+      text: `${unsupported.length} 个运行中的程序不支持代理（比如 ${unsupported[0].comm}），只能靠 tunless 转发，或者开 TUN`,
     });
   }
 
@@ -81,17 +81,18 @@ export function HelpPanel({ width }) {
   const cardWidth = Math.min(width, 78);
 
   const whatRows = [
-    kv("解决的问题", [txt("工具连不上代理网络")], 12),
+    kv("解决的问题", [txt("Agent 不开 TUN 就联不上网")], 12),
     [txt("  ")],
-    kv("", [txt("比如 Antigravity 不读系统代理，也不认 HTTPS_PROXY")], 12),
-    kv("", [txt("内网域名被解析到公网地址")], 12),
+    kv("", [txt("Antigravity / Cursor / CLI Agent 只认 HTTPS_PROXY，")], 12),
+    kv("", [txt("或者干脆忽略代理设置，过去只能开 TUN")], 12),
+    kv("", [txt("开了 TUN 内网域名又被劫持，公司内网就连不上")], 12),
     [txt("  ")],
-    kv("给谁用", [txt("Antigravity 这类只认 HTTPS_PROXY 的工具")], 12),
+    kv("这个工具", [txt("给你一个本地代理，让 Agent 不靠 TUN 也能出网")], 12),
   ];
 
   const stepsRows = [
     kv("第 1 步", [txt("按 S 安装／启动转发服务，监听 127.0.0.1:8899")], 10),
-    kv("第 2 步", [txt("按 l 用这个代理重启 Antigravity")], 10),
+    kv("第 2 步", [txt("按 l 用这个代理重启 Agent（默认 Antigravity）")], 10),
     kv("第 3 步", [txt("内网域名解析不对时按 f 生成并应用修复")], 10),
   ];
 
@@ -104,15 +105,15 @@ export function HelpPanel({ width }) {
   ];
 
   const tunRows = [
-    kv("什么时候开", [txt("只有某个工具完全忽略代理设置时才需要")], 12),
-    kv("", [txt("开了 TUN 内网域名也会经过内核，多数情况不要开")], 12),
+    kv("什么时候开", [txt("只有完全无法走代理的工具才需要")], 12),
+    kv("", [txt("开了 TUN 内网域名会被劫持，这也是本工具想避免的")], 12),
   ];
 
   const cmdRows = [
-    kv("netfix doctor", [txt("只诊断，不改任何东西")], 22),
-    kv("netfix scan", [txt("列出扫到的内网域名")], 22),
-    kv("netfix fix", [txt("生成并应用修复方案")], 22),
-    kv("netfix launch", [txt("带代理重启某个应用")], 22),
+    kv("tunless doctor", [txt("只诊断，不改任何东西")], 22),
+    kv("tunless scan", [txt("列出扫到的内网域名")], 22),
+    kv("tunless fix", [txt("生成并应用修复方案")], 22),
+    kv("tunless launch", [txt("带代理重启某个应用")], 22),
   ];
 
   return h(

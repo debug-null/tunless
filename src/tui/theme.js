@@ -89,10 +89,10 @@ export const ASCII_SYMBOLS = {
 
 /**
  * 判断终端能否显示 Unicode。
- * NETFIX_ASCII=1 强制降级；否则看 locale 是否是 UTF-8。
+ * TUNLESS_ASCII=1 强制降级；否则看 locale 是否是 UTF-8。
  */
 export function detectUnicode() {
-  if (process.env.NETFIX_ASCII === "1") return false;
+  if (process.env.TUNLESS_ASCII === "1") return false;
   // locale 优先级：LC_ALL > LC_CTYPE > LANG
   const locale = [process.env.LC_ALL, process.env.LC_CTYPE, process.env.LANG].find(
     (value) => Boolean(value),
