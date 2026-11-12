@@ -110,7 +110,7 @@ export async function openUpstreamSocks(upstream, host, port, timeout = 8000) {
   await new Promise((resolve, reject) => {
     socket.once("connect", resolve);
     socket.once("error", reject);
-    socket.setTimeout(timeout, () => reject(new Error("upstream socks timeout")));
+    socket.setTimeout(timeout, () => reject(new Error("上游 SOCKS5 握手超时")));
   });
   socket.setTimeout(0);
 
@@ -118,7 +118,7 @@ export async function openUpstreamSocks(upstream, host, port, timeout = 8000) {
   const greeting = await readBytes(socket, 2);
   if (!greeting || greeting[0] !== 5 || greeting[1] !== 0) {
     socket.destroy();
-    throw new Error("upstream refused SOCKS5 greeting");
+    throw new Error("上游拒绝了 SOCKS5 握手");
   }
 
   const hostBuf = Buffer.from(normalizeHost(host), "utf8");
@@ -135,13 +135,13 @@ export async function openUpstreamSocks(upstream, host, port, timeout = 8000) {
   const head = await readBytes(socket, 4);
   if (!head) {
     socket.destroy();
-    throw new Error("upstream socks closed during request");
+    throw new Error("上游 SOCKS5 在请求期间关闭连接");
   }
   const reply = await readBytes(socket, head[3] === 1 ? 4 : head[3] === 4 ? 16 : 1);
   const portBuf = await readBytes(socket, 2);
   if (!head || head[1] !== 0) {
     socket.destroy();
-    throw new Error(`upstream socks refused CONNECT (code ${head?.[1]})`);
+    throw new Error(`上游 SOCKS5 拒绝 CONNECT（错误码 ${head?.[1]}）`);
   }
   void reply;
   void portBuf;
@@ -355,7 +355,7 @@ export class Socks5Server {
         upstreamSocket = await openUpstreamSocks(this.upstream, host, port);
       }
     } catch (err) {
-      this.log(`SOCKS5 ${host}:${port} failed: ${err.message}`);
+      this.log(`SOCKS5 ${host}:${port} 失败：${err.message}`);
       socket.write(Buffer.from([5, 1, 0, 1, 0, 0, 0, 0, 0, 0]));
       return socket.destroy();
     }

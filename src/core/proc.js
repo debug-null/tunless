@@ -82,10 +82,10 @@ export async function processesWithDirectConnections(pids) {
 
 export function proxyAdvice(entry) {
   if (entry.status === "supported") {
-    return `Supports HTTPS_PROXY — launch it with HTTPS_PROXY=http://127.0.0.1:<mixed-port> to route through the proxy.`;
+    return `支持 HTTPS_PROXY — 用 HTTPS_PROXY=http://127.0.0.1:<混合端口> 启动它即可走代理。`;
   }
   if (entry.status === "unsupported") {
-    return `Does not read HTTPS_PROXY — needs TUN mode (or a per-app SOCKS proxy) to reach proxied networks.`;
+    return `不读取 HTTPS_PROXY — 需要开启 TUN 模式（或为它单独配置 SOCKS 代理）才能访问代理网络。`;
   }
-  return `Proxy support could not be determined for this binary.`;
+  return `无法确定该程序是否支持代理环境变量。`;
 }

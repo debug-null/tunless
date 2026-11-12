@@ -52,7 +52,7 @@ async function launchctl(args, { ignoreFailure = false } = {}) {
     return await exec("launchctl", args, { timeout: 15000 });
   } catch (err) {
     if (ignoreFailure) return { stdout: "", stderr: err.message };
-    throw new Error(`launchctl ${args.join(" ")} failed: ${err.stderr || err.message}`);
+    throw new Error(`launchctl ${args.join(" ")} 执行失败：${err.stderr || err.message}`);
   }
 }
 

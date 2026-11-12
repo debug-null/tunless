@@ -33,7 +33,7 @@ export function buildQuery(name, type = 1) {
   const parts = [];
   for (const label of labels) {
     const bytes = Buffer.from(label, "ascii");
-    if (bytes.length > 63) throw new Error(`label too long: ${label}`);
+    if (bytes.length > 63) throw new Error(`域名标签过长：${label}`);
     parts.push(Buffer.from([bytes.length]), bytes);
   }
   parts.push(Buffer.from([0]));
@@ -53,7 +53,7 @@ function readName(msg, offset) {
   let guard = 0;
 
   while (off < msg.length) {
-    if (++guard > 128) throw new Error("dns name loop");
+    if (++guard > 128) throw new Error("域名解析陷入循环");
     const len = msg[off];
     if (len === 0) {
       off += 1;
@@ -75,7 +75,7 @@ function readName(msg, offset) {
 }
 
 export function parseResponse(msg) {
-  if (msg.length < 12) throw new Error("dns response too short");
+  if (msg.length < 12) throw new Error("DNS 响应过短");
   const rcode = msg.readUInt16BE(2) & 0x0f;
   const qdcount = msg.readUInt16BE(4);
   const ancount = msg.readUInt16BE(6);

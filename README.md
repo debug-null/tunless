@@ -1,78 +1,108 @@
 # netfix
 
-Diagnose and fix two proxy problems that bite tools (AI editors, CLIs, IDE plugins) on macOS:
+诊断并修复 macOS 上两类代理问题：
 
-1. **The tool cannot reach proxied networks** — it ignores the system proxy and has no `HTTPS_PROXY` support, so it needs TUN mode.
-2. **Internal domains resolve to public IPs** — the proxy core hands out fake-IPs or public answers for `*.17usoft.com`-style internal zones, so the tool talks to the wrong server.
+1. **工具连不上代理网络** —— 程序不读系统代理，也没有 `HTTPS_PROXY` 支持，只能开 TUN。
+2. **内网域名解析到公网 IP** —— 代理内核给内网域名发了假 IP 或公网答案，工具连错服务器。
 
-`netfix` is frontend-agnostic: it talks to any running [mihomo](https://github.com/MetaCubeX/mihomo) core over its REST API, and ships a Clash Verge Rev adapter that writes the persistent *merge enhancement* layer (which survives subscription updates).
+netfix 与具体客户端无关：它通过 REST 接口跟任何运行中的 [mihomo](https://github.com/MetaCubeX/mihomo) 内核通信，并为 Clash Verge Rev 提供适配器，把配置写进订阅更新后仍保留的 merge 增强层。
 
-Zero runtime dependencies — Node built-ins only.
+零运行时依赖 —— 只用 Node 内置模块。
 
-## Install
+## 安装
 
 ```bash
-git clone <this-repo> ~/github/netfix
+git clone <本仓库> ~/github/netfix
 mkdir -p ~/.local/bin
 ln -sf ~/github/netfix/bin/netfix.js ~/.local/bin/netfix
 chmod +x ~/github/netfix/bin/netfix.js
 ```
 
-`~/.local/bin` must be on your `PATH`.
+`~/.local/bin` 需在 `PATH` 中。
 
-## Usage
+## 用法
+
+直接运行 `netfix` 会打开图形界面：
 
 ```bash
-netfix doctor          # diagnose only — never writes anything
-netfix scan            # list candidate domains and how they resolve
-netfix fix             # plan → preview diff → confirm → apply → verify → rollback on failure
-netfix proxy           # run a local proxy that hands proxy access to tools
+netfix                 # 图形界面（TUI）
+netfix doctor          # 只诊断，不修改任何东西
+netfix scan            # 列出候选域名及其解析结果
+netfix fix             # 方案 → 预览差异 → 确认 → 应用 → 校验 → 失败自动回滚
+netfix proxy           # 启动本地转发代理，把代理能力交给工具
+netfix launch <应用>    # 带代理环境重启某个应用
+netfix service <操作>   # install | uninstall | status | logs
 ```
 
-### Options
+### 图形界面
 
-| Flag | Meaning |
+```
+┌ netfix 代理与内网诊断工具 ─────────────────────────────
+│ 代理内核 / 内网概况
+│
+│ 1 总览 │ 2 内网域名 │ 3 程序代理能力 │ 4 分流规则 │ 5 操作日志
+│ r 刷新 · f 修复 · p 转发 · S 服务 · l 启动应用 · q 退出
+```
+
+| 按键 | 作用 |
 | --- | --- |
-| `--internal-dns <ip>` | Internal DNS server (default `10.249.150.130`) |
-| `--repos <paths>` | Comma-separated repo roots to scan for hostnames |
-| `--no-chrome` | Skip Chrome history (it needs Full Disk Access) |
-| `--frontend <id>` | Force `clash-verge-rev` or `generic-mihomo` |
-| `--config <path>` | Explicit config file (generic frontend) |
-| `--yes`, `-y` | Skip the confirmation prompt (scripting) |
+| `1`–`5` | 切换面板 |
+| `r` | 重新采集状态 |
+| `f` | 一键修复（写入配置并校验） |
+| `p` | 启动转发服务 |
+| `S` | 启停转发服务 |
+| `l` | 用 netfix 代理重启应用 |
+| `q` | 退出 |
 
-## How it decides what is internal
+界面按显示宽度排版，中文不会错位；窄终端（50 列以上）也不会溢出。
 
-A hostname is **internal** when it resolves to an RFC1918 private address (`10./127./192.168./172.16-31.`). Dual-resolver probing is *not* used: on split-horizon networks both resolvers can answer identically, so the address class is the only reliable signal.
+### 选项
 
-DNS queries are hand-rolled UDP packets (`node:dgram`) on purpose — `dns.Resolver.setServers()` is hijacked by the proxy core when TUN is on, so it cannot reach the internal resolver.
+| 参数 | 含义 |
+| --- | --- |
+| `--internal-dns <ip>` | 内网 DNS 服务器（默认 `10.249.150.130`） |
+| `--repos <路径>` | 逗号分隔的仓库根目录，用于扫描域名 |
+| `--no-chrome` | 跳过 Chrome 历史记录（需要完全磁盘访问权限） |
+| `--frontend <id>` | 指定前端：`clash-verge-rev` / `generic-mihomo` |
+| `--config <路径>` | 指定配置文件（通用前端） |
+| `--yes`, `-y` | 跳过确认提示 |
 
-Addresses in `198.18.0.0/16` mean the domain still resolves to a *fake-IP*: it needs a `fake-ip-filter` entry.
+## 判定内网域名的依据
 
-## How it fixes things
+域名解析到 **RFC1918 私网地址**（`10./127./192.168./172.16-31.`）即判定为内网。不使用「双 DNS 对比」：在分离解析（split-horizon）网络里两个解析器可能给出完全相同的答案，只有地址类别是可靠信号。
 
-1. Scan for candidate hostnames (shell history, Clash logs, repos, Chrome history).
-2. Resolve each one against the internal DNS server and classify it.
-3. Collapse internal hosts into suffix wildcards (`matrix.17usoft.com` + `git.17usoft.com` → `17usoft.com`), keeping distinct delegations such as `cdb.17usoft.com` separate when the parent domain is also in play.
-4. Write a `nameserver-policy` + `fake-ip-filter` block:
-   - **Clash Verge Rev** → the active profile's *merge enhancement* file, then restart the GUI (its runtime config lives in a root-owned directory that the mihomo API refuses to load from external paths).
-   - **Generic mihomo** → the config file itself, then `PUT /configs?force=true` to hot-reload.
-5. Verify: re-resolve every internal host and confirm it still lands on a private IP. On failure the backup is restored automatically.
+DNS 查询是手写的 UDP 报文（`node:dgram`）——TUN 开启时 `dns.Resolver.setServers()` 会被内核劫持，根本到不了内网解析器。
 
-Backups are written to `~/.netfix/backups/<timestamp>/` before anything is changed.
+`198.18.0.0/16` 段的地址意味着域名仍解析为**假 IP**，需要加入 `fake-ip-filter`。
 
-## `netfix proxy` — proxy access for tools that ignore the system proxy
+## 修复做了什么
 
-Many tools (Electron apps, some CLI tools, IDE plugins) never read the macOS
-system proxy, so the usual answer is "turn on TUN". TUN hijacks the whole
-machine, which is heavy and tends to break internal networks.
+1. 扫描候选域名（shell 历史、Clash 日志、仓库、Chrome 历史）。
+2. 逐个用内网 DNS 解析并分类。
+3. 把内网域名归并成后缀通配（`matrix.17usoft.com` + `git.17usoft.com` → `17usoft.com`）。
+4. 写入 `nameserver-policy` 与 `fake-ip-filter`：
+   - **Clash Verge Rev** → 当前订阅的 merge 增强文件，然后重启 GUI（运行时配置位于 root 权限目录，内核接口拒绝从外部路径加载）。
+   - **通用 mihomo** → 直接改配置文件，再用 `PUT /configs?force=true` 热重载。
+5. 校验：重新解析每个内网域名，确认仍落在私网地址；失败自动从备份恢复。
 
-`netfix proxy` is the lighter alternative: it is a small local forward proxy
-that sits between the tool and the running mihomo core.
+改动前会备份到 `~/.netfix/backups/<时间戳>/`。
+
+### 后缀安全
+
+归并不会越过公网父域。若 `elong.com` 解析到公网、但 `ai.corp.elong.com` 解析到私网，生成的后缀是 `corp.elong.com` 而不是 `elong.com` —— 否则该公网域下的所有主机都会被送进直连，正常上网就断了。
+
+反之，父域本身没有 A 记录（内网区的常见形态）时，归并是安全的。
+
+## `netfix proxy` —— 给不认系统代理的工具发代理
+
+很多工具（Electron 应用、部分 CLI、IDE 插件）从不读取 macOS 系统代理，常见做法是「开 TUN」。TUN 会接管整台机器，笨重且容易搞坏内网。
+
+`netfix proxy` 是更轻的替代：一个本地正向代理，坐在工具和运行中的 mihomo 内核之间。
 
 ```bash
 netfix proxy
-#   http proxy  : http://127.0.0.1:8899
-#   socks5 proxy: socks5://127.0.0.1:8898
+#   HTTP 代理 ：http://127.0.0.1:8899
+#   SOCKS5 代理：socks5://127.0.0.1:8898
 
 export HTTPS_PROXY=http://127.0.0.1:8899
 export HTTP_PROXY=http://127.0.0.1:8899
@@ -80,46 +110,57 @@ export ALL_PROXY=socks5://127.0.0.1:8898
 export NO_PROXY=17usoft.com,17u.cn
 ```
 
-Routing rules:
+分流规则：
 
-| Target | Action |
+| 目标 | 行为 |
 | --- | --- |
-| Internal domain (matches the internal suffix list) | resolve through the internal DNS server, connect straight to the private address |
-| Everything else | tunnelled to the upstream mihomo mixed port |
+| 内网域名（命中内网后缀表） | 走内网 DNS 解析，直连私网地址，**不经过代理** |
+| 其他所有域名 | 隧道给内核的混合端口 |
 
-The internal suffix list comes from the client config that is already in use
-(the `nameserver-policy` keys) plus a live scan, so `netfix proxy` inherits
-whatever `netfix fix` has already configured — the proxy information is read
-from the running core, never hard-coded.
+内网后缀表来自正在使用的客户端配置（`nameserver-policy` 的键）加上实时扫描，因此 `netfix proxy` 会自动继承 `netfix fix` 已经配好的结果——代理信息从运行中的内核读取，不写死。
 
-Useful flags:
+### 常用参数
 
-| Flag | Meaning |
+| 参数 | 含义 |
 | --- | --- |
-| `--port <n>` | HTTP proxy port (default `8899`) |
-| `--socks-port <n>` | SOCKS5 port (default `8898`, `0` disables) |
-| `--print-env` | Print the environment and exit, without listening |
-| `--no-scan` | Use only the client config, skip the live scan |
-| `--upstream <host:port>` | Override the upstream core listener |
+| `--port <n>` | HTTP 代理端口（默认 `8899`） |
+| `--socks-port <n>` | SOCKS5 端口（默认 `8898`，`0` 表示禁用） |
+| `--print-env` | 只打印环境变量后退出，不监听 |
+| `--no-scan` | 只用客户端配置，跳过实时扫描 |
+| `--upstream <host:port>` | 手动指定上游内核地址 |
 
-To keep it running in the background:
+### 常驻运行
 
 ```bash
-nohup netfix proxy > ~/.netfix/proxy.log 2>&1 &
+netfix service install     # 开机自启，崩溃自动拉起
+netfix service status
+netfix service logs
+netfix service uninstall
 ```
 
-## Program proxy capability
-
-`netfix doctor` also checks whether running binaries honour `HTTPS_PROXY`. Go's `net/http` reads the environment through `golang.org/x/net/http/httpproxy`, so the presence of that symbol in the binary is the signal. A program without it needs TUN mode (or a per-app SOCKS proxy) to reach proxied networks.
-
-## Development
+### 用代理重启某个工具
 
 ```bash
-npm test        # node --test, no network access required
+netfix launch Antigravity
+netfix launch Cursor --print-env     # 只看会注入什么
 ```
 
-## Limitations
+先退出旧实例（否则旧环境会存活），再通过 `open --env` 重新拉起。
 
-- macOS only (`scutil`, `osascript`, `strings`, `pkill`).
-- Chrome history requires Full Disk Access; without it the scan degrades gracefully.
-- `netfix` never edits your shell profile — proxy hints are printed for you to act on.
+注意：部分应用会通过登录 shell 拉起子进程，从而重新读取 `~/.zshrc`。若你的 shell 自己导出了 `NO_PROXY`，子进程可能拿到 shell 里的那份列表而非注入的那份。只要 shell 的列表也包含内网域名就无害；即使内网域名真的走到 netfix，分流判定也依然正确。
+
+## 程序代理能力
+
+`netfix doctor` 会检查运行中的程序是否认可 `HTTPS_PROXY`。Go 的 `net/http` 通过 `golang.org/x/net/http/httpproxy` 读取环境变量，因此二进制中存在该符号即可判定支持。不支持的程序需要 TUN 模式（或单独配置 SOCKS 代理）才能访问代理网络。
+
+## 开发
+
+```bash
+npm test        # node --test，无需网络
+```
+
+## 限制
+
+- 仅支持 macOS（依赖 `scutil`、`osascript`、`strings`、`pkill`）。
+- Chrome 历史需要「完全磁盘访问权限」，未授权时自动降级。
+- netfix 不会修改你的 shell 配置文件 —— 代理提示只打印出来，由你决定是否采用。

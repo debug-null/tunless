@@ -56,11 +56,11 @@ export function scanShellHistory() {
     if (!fs.existsSync(p)) continue;
     const text = readTextSafe(p);
     if (text === null) {
-      notes.push(`${file}: unreadable`);
+      notes.push(`${file}: 无法读取`);
       continue;
     }
     if (typeof text === "object") {
-      notes.push(`${file}: ${text.error}`);
+      notes.push(`${file}: 权限不足`);
       continue;
     }
     for (const d of extractDomains(text)) hosts.add(d);
@@ -78,7 +78,7 @@ export function scanClashLogs(logDir) {
   try {
     entries = fs.readdirSync(logDir).filter((f) => f.endsWith(".log"));
   } catch {
-    return { hosts: [], sources: [], notes: [`${logDir}: unreadable`] };
+    return { hosts: [], sources: [], notes: [`${logDir}: 无法读取`] };
   }
   for (const f of entries.slice(-10)) {
     const text = readTextSafe(path.join(logDir, f));
@@ -117,9 +117,9 @@ export async function scanRepos(roots, { maxBytes = 40 * 1024 * 1024 } = {}) {
       sources.push(root);
     } catch (err) {
       if (err.code === "ENOENT") {
-        notes.push(`${root}: rg not installed, skipped`);
+        notes.push(`${root}: 未安装 rg，已跳过`);
       } else {
-        notes.push(`${root}: scan failed (${err.code || err.message})`);
+        notes.push(`${root}: 扫描失败（${err.code || err.message}）`);
       }
     }
   }
@@ -138,7 +138,7 @@ export function scanChromeHistory() {
       hosts: [],
       sources: [],
       notes: [
-        "chrome-history: permission denied — grant your terminal Full Disk Access for a more complete domain list",
+        "chrome-history: 权限不足 — 请给终端授予「完全磁盘访问权限」以获取更完整的域名列表",
       ],
     };
   }
@@ -146,7 +146,7 @@ export function scanChromeHistory() {
     return {
       hosts: [],
       sources: [],
-      notes: ["chrome-history: permission denied — grant your terminal Full Disk Access for a more complete domain list"],
+      notes: ["chrome-history: 权限不足 — 请给终端授予「完全磁盘访问权限」以获取更完整的域名列表"],
     };
   }
   const hosts = new Set();

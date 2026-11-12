@@ -20,12 +20,12 @@ export class VergeAdapter {
   async prepare() {
     if (!this.targetFile) {
       throw new Error(
-        "could not locate the active profile's merge enhancement file in profiles.yaml; " +
-          "make sure a merge enhancement is configured for the current profile",
+        "无法在 profiles.yaml 中定位当前订阅的 merge 增强文件；" +
+          "请确认已为当前订阅配置 merge 增强",
       );
     }
     if (!fs.existsSync(this.targetFile)) {
-      throw new Error(`merge file not found: ${this.targetFile}`);
+      throw new Error(`找不到 merge 文件：${this.targetFile}`);
     }
     return { file: this.targetFile };
   }

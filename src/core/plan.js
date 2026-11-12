@@ -104,9 +104,12 @@ export async function mergeHostsValidated(
   };
 
   const narrow = async (host, base) => {
-    // Walk down from the registrable domain until the first non-public level.
+    // Walk down from the registrable domain to the first level that resolves
+    // privately; a level without records cannot be public either, so it is a
+    // safe boundary. If nothing qualifies, keep the host itself.
     for (const ancestor of ancestorsBetween(host, base)) {
-      if ((await kindOf(ancestor)) !== "public") return ancestor;
+      const kind = await kindOf(ancestor);
+      if (kind === "internal" || kind === "nxdomain") return ancestor;
     }
     return host;
   };
@@ -119,9 +122,18 @@ export async function mergeHostsValidated(
       continue;
     }
 
-    if ((await kindOf(base)) === "public") {
-      // Public parent: never widen past the first private level.
+    const baseKind = await kindOf(base);
+    if (baseKind === "public") {
+      // The parent resolves to a public address: widening into it would
+      // send every host under that public domain direct. Stay below it.
       out.add(await narrow(host, base));
+      continue;
+    }
+    if (baseKind === "nxdomain") {
+      // The parent has no address record of its own (a common shape for
+      // internal zones). It cannot belong to the public internet, so
+      // collapsing into it is safe.
+      out.add(base);
       continue;
     }
 

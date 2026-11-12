@@ -119,6 +119,35 @@ test("mergeHostsValidated keeps collapsing when the parent is private", async ()
   assert.deepEqual(suffixes, ["17usoft.com"]);
 });
 
+test("mergeHostsValidated treats a parent without address records as safe to collapse into", async () => {
+  // 17usoft.com has no A record of its own, yet it is an internal zone:
+  // collapsing into it must stay allowed.
+  const kinds = {
+    "17usoft.com": "nxdomain",
+    "matrix.17usoft.com": "internal",
+    "git.17usoft.com": "internal",
+  };
+  const classify = async (name) => ({ kind: kinds[name] ?? "nxdomain" });
+  const { mergeHostsValidated } = await import("../src/core/plan.js");
+  const suffixes = await mergeHostsValidated(
+    ["matrix.17usoft.com", "git.17usoft.com"],
+    { classify },
+  );
+  assert.deepEqual(suffixes, ["17usoft.com"]);
+});
+
+test("mergeHostsValidated stops below a public parent even when the level below has no records", async () => {
+  const kinds = {
+    "elong.com": "public",
+    "corp.elong.com": "nxdomain",
+    "ai.corp.elong.com": "internal",
+  };
+  const classify = async (name) => ({ kind: kinds[name] ?? "nxdomain" });
+  const { mergeHostsValidated } = await import("../src/core/plan.js");
+  const suffixes = await mergeHostsValidated(["ai.corp.elong.com"], { classify });
+  assert.deepEqual(suffixes, ["corp.elong.com"]);
+});
+
 test("mergeHostsValidated keeps an observed sub-delegation beside its parent", async () => {
   const classify = async () => ({ kind: "internal" });
   const { mergeHostsValidated } = await import("../src/core/plan.js");

@@ -41,7 +41,7 @@ export class MihomoApi {
         res.on("end", () => {
           const text = Buffer.concat(chunks).toString("utf8");
           if (res.statusCode >= 400) {
-            const err = new Error(`HTTP ${res.statusCode} on ${method} ${path}: ${text.slice(0, 300)}`);
+            const err = new Error(`${method} ${path} 返回 HTTP ${res.statusCode}：${text.slice(0, 300)}`);
             err.statusCode = res.statusCode;
             err.body = text;
             return reject(err);
@@ -50,7 +50,7 @@ export class MihomoApi {
         });
       });
       req.on("timeout", () => {
-        req.destroy(new Error(`timeout after ${this.timeout}ms: ${method} ${path}`));
+        req.destroy(new Error(`请求超时（${this.timeout}ms）：${method} ${path}`));
       });
       req.on("error", reject);
       if (payload !== null) req.write(payload);
@@ -63,7 +63,7 @@ export class MihomoApi {
     try {
       return JSON.parse(text);
     } catch {
-      throw new Error(`invalid JSON from ${path}: ${text.slice(0, 200)}`);
+      throw new Error(`来自 ${path} 的 JSON 无法解析：${text.slice(0, 200)}`);
     }
   }
 
@@ -109,7 +109,7 @@ export async function probeApi(candidates) {
     }
   }
   const detail = failures.map((f) => `  - ${new MihomoApi(f.candidate).descriptor}: ${f.error}`).join("\n");
-  const error = new Error(`no reachable mihomo API found:\n${detail}`);
+  const error = new Error(`找不到可达的 mihomo 接口：\n${detail}`);
   error.failures = failures;
   throw error;
 }
