@@ -226,3 +226,21 @@ test("亮色主题用深色前景字，暗色主题用白色", () => {
   assert.equal(getTheme("light").colors.text, "black");
   assert.equal(getTheme("light").colors.warn, "magenta");
 });
+
+test("总览面板带提示时也能渲染（回归：cardWidth 提前使用会 TDZ 报错）", async () => {
+  const state = {
+    ...baseState,
+    notes: [
+      "chrome-history: 权限不足 — 请给终端授予「完全磁盘访问权限」以获取更完整的域名列表",
+    ],
+  };
+  const text = await shot(
+    h(
+      Box,
+      { flexDirection: "column", width: 120 },
+      h(OverviewPanel, { state, width: 120 }),
+    ),
+  );
+  assert.match(text, /提示/);
+  assert.match(text, /完全磁盘访问权限/);
+});

@@ -109,6 +109,8 @@ export function OverviewPanel({ state, width }) {
     ),
   ];
 
+  const cardWidth = Math.min(width, 74);
+
   // 提示可能很长，在卡片里按显示宽度换行，不截断
   const noteRows = state.notes?.length
     ? state.notes.slice(0, 3).flatMap((note) => {
@@ -119,7 +121,6 @@ export function OverviewPanel({ state, width }) {
       })
     : null;
 
-  const cardWidth = Math.min(width, 74);
   // 宽终端下把「代理内核」和「转发服务」并排放，避免右边空一大片
   const twoColumn = width >= 96;
 
