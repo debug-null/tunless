@@ -422,7 +422,7 @@ test("向导第 2 步让用户先选上游代理，可手动填写", async () =>
     ),
   );
   assert.match(empty, /没探测到可用的代理/);
-  assert.match(empty, /按 m 直接填端口/);
+  assert.match(empty, /按 m 或回车直接填端口/);
 });
 
 test("向导第 2 步手动填写模式显示输入框", async () => {

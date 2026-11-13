@@ -7,15 +7,16 @@
 // 三态诚实跟向导同一套：live.verdict 是进程的真实连接（ok/stale/not-running/
 // unknown），配置写对不代表生效，读不到就说读不到。
 import { Box, Text } from "ink";
-import { h, useTheme, txt, segments, Section, optionRow } from "../ui.js";
-import { padEnd } from "../width.js";
+import { h, useTheme, useUnicode, txt, segments, Section, optionRow } from "../ui.js";
+import { symbolSet } from "../theme.js";
+import { displayWidth, padEnd } from "../width.js";
 import { rowsFor } from "../../core/status-rows.js";
 import { StatusRow } from "../components/status-row.js";
 import { actionsFor } from "../app-menu.js";
 import { findApp, codexProxyState } from "../../core/apps.js";
 
 /** list 阶段的行：StepApps 的行格式（installed 过滤、版本·状态·走代理标记） */
-function listRows(theme, apps, cursor) {
+function listRows(theme, arrow, apps, cursor) {
   const rows = [];
   if (!apps.length) {
     rows.push([txt("  "), txt("没有检测到 Antigravity / Cursor", { dim: true })]);
@@ -44,6 +45,7 @@ function listRows(theme, apps, cursor) {
         app.name,
         [app.version ?? "", stateText].filter(Boolean).join(" · ") + proxied,
         nameWidth,
+        { arrow },
       ),
     );
   });
@@ -51,7 +53,7 @@ function listRows(theme, apps, cursor) {
 }
 
 /** actions 阶段的行：StepLaunch 的信息区（服务/上游/why/真实连接）+ 动作选项 */
-function actionRows(theme, { state, appName, appId, live, result, executing, actionIndex }) {
+function actionRows(theme, arrow, { state, appName, appId, live, result, executing, actionIndex, width }) {
   const side = state.sidecar ?? {};
   const rows = [];
 
@@ -164,9 +166,19 @@ function actionRows(theme, { state, appName, appId, live, result, executing, act
     rows.push([txt("  "), txt("回车启动转发服务", { dim: true })]);
   } else {
     const actions = actionsFor(app?.id);
-    const labelWidth = Math.max(...actions.map((a) => a.label.length)) + 2;
+    // label 是中文：按显示宽度算列宽；detail 给宽度预算截断，
+    // 不然 80 列终端上 ink 会从行中间拦腰断词。
+    const labelWidth = Math.max(...actions.map((a) => displayWidth(a.label))) + 2;
+    const detailWidth = Math.max(8, (width ?? 80) - labelWidth - 7);
+    // 高亮和回车取值用同一个 clamp
+    const cursor = Math.min(Math.max(0, actionIndex), Math.max(0, actions.length - 1));
     actions.forEach((action, i) => {
-      rows.push(optionRow(theme, i === actionIndex, action.label, action.detail, labelWidth));
+      rows.push(
+        optionRow(theme, i === cursor, action.label, action.detail, labelWidth, {
+          arrow,
+          detailWidth,
+        }),
+      );
     });
   }
   return rows;
@@ -185,10 +197,11 @@ export function AppsScreen({
   executing = null,
 }) {
   const theme = useTheme();
+  const arrow = symbolSet(useUnicode()).arrow;
   const apps = (state.apps ?? []).filter((a) => a.installed);
 
   if (stage === "actions") {
-    const rows = actionRows(theme, {
+    const rows = actionRows(theme, arrow, {
       state,
       appName,
       appId,
@@ -196,6 +209,7 @@ export function AppsScreen({
       result,
       executing,
       actionIndex,
+      width,
     });
     return h(
       Box,
@@ -214,7 +228,7 @@ export function AppsScreen({
   // 光标跟着 appIndex 走但要夹在列表内：外部刷新后列表变短，
   // 高亮不能停在空气上（回车选中时也是按这个夹值取应用）。
   const cursor = Math.min(Math.max(0, appIndex), Math.max(0, apps.length - 1));
-  const rows = listRows(theme, apps, cursor);
+  const rows = listRows(theme, arrow, apps, cursor);
 
   return h(
     Box,

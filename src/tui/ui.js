@@ -69,19 +69,26 @@ export function kv(label, valueSegments, labelWidth = 12) {
 }
 
 /**
- * 可选列表行片段：❯ 指针 + 定宽标题 + 说明。
+ * 可选列表行片段：指针 + 定宽标题 + 说明。
  * 向导（steps.js）与钻取屏（screens/*）共用的行格式 ——
  * 两边渲染同一批选项，别长成两种样子。
+ *
+ * opts.arrow：选中行指针字形，调用方给 symbolSet(useUnicode()).arrow ——
+ * 本函数不是组件，不能自己调 hook；硬编码 ❯ 会让 ASCII 终端看到乱码。
+ * opts.detailWidth：detail 的显示宽度预算，超长截断而不是让 ink 拦腰断词。
  */
-export function optionRow(theme, selected, title, detail, titleWidth) {
+export function optionRow(theme, selected, title, detail, titleWidth, opts = {}) {
+  const arrow = opts.arrow ?? "❯";
+  const detailText =
+    detail && opts.detailWidth ? truncate(detail, opts.detailWidth) : detail;
   return [
     txt("  "),
-    txt(selected ? "❯ " : "  ", { color: selected ? theme.colors.accent : undefined }),
+    txt(selected ? `${arrow} ` : "  ", { color: selected ? theme.colors.accent : undefined }),
     txt(padEnd(title, titleWidth), {
       bold: selected,
       color: selected ? theme.colors.accent : undefined,
     }),
-    detail ? txt("   " + detail, { dim: true }) : null,
+    detailText ? txt("   " + detailText, { dim: true }) : null,
   ].filter(Boolean);
 }
 

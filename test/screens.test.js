@@ -163,7 +163,7 @@ test("upstream 屏：探不到候选时给手动通道", async () => {
     wrap(h(UpstreamScreen, { state: st, width: 100, index: 0 })),
   );
   assert.match(out, /没探测到可用的代理/);
-  assert.match(out, /按 m 直接填端口/);
+  assert.match(out, /按 m 或回车直接填端口/);
 });
 
 const withApps = {

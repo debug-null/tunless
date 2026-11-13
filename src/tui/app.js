@@ -33,11 +33,9 @@ import { KeyBar } from "./components/key-bar.js";
 import { EventFeed } from "./components/event-feed.js";
 import { actionsFor } from "./app-menu.js";
 import {
-  APPS,
   findApp,
   appProxyPorts,
   proxyVerdict,
-  mainPid,
   waitForMainPid,
   networkPid,
   processProxyEnv,
@@ -915,6 +913,8 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
           return;
         }
         if (key.return) {
+          // 动作在跑时回车不能再起一个 —— 双击回车 = 起两次应用。
+          if (executing || busy) return;
           if (stepResult) {
             // 结果页的回车是「看完了」：清掉回到动作列表，不是再跑一遍
             setStepResult(null);
@@ -951,7 +951,11 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
               // 刚写完配置/重启过，立刻重新看真实连接
               await refreshLive();
             })
-            .catch((err) => setHint(`操作失败：${err.message}`))
+            .catch((err) => {
+              setHint(`操作失败：${err.message}`);
+              // hint 在 apps 屏不显示（底栏是事件流），原因也得落一条事件
+              log(`操作失败：${err.message}`, "bad");
+            })
             .finally(() => {
               setBusy(false);
               setExecuting(null);
@@ -977,6 +981,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         const app = installed[Math.min(appIndex, Math.max(0, installed.length - 1))];
         if (!app) {
           setHint("没检测到可用的工具，先装 Antigravity 或 Cursor");
+          log("没检测到可用的工具", "warn");
           return;
         }
         setAppName(app.name);
@@ -1099,6 +1104,8 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         return;
       }
       if (key.return) {
+        // 动作在跑时回车不能再起一个 —— 与 apps 屏同一个守卫。
+        if (executing || busy) return;
         if (stepResult) {
           // 这一步做完了，等用户自己回车才进下一步
           setStepResult(null);
@@ -1357,10 +1364,9 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   );
 }
 
-// 仪表盘底栏按键：只列现在真能用的
+// 仪表盘底栏按键：8 项约 70 列，80 列终端放得下。↑↓/回车不单独占格 ——
+// 行内 action 文案（回车看详情）已经在教。
 const DASHBOARD_KEYS = [
-  ["↑↓", "选择"],
-  ["回车", "详情"],
   ["u", "上游"],
   ["d", "域名"],
   ["l", "服务"],

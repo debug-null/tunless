@@ -8,7 +8,8 @@
 // 候选列表来自真实探测（系统代理 / mihomo API / 本机监听端口，且都验过协议），
 // 探测不到就让用户直接写 —— 不要假装「没检测到 = 一定没有」。
 import { Box, Text } from "ink";
-import { h, useTheme, txt, segments, Section, optionRow } from "../ui.js";
+import { h, useTheme, useUnicode, txt, segments, Section, optionRow } from "../ui.js";
+import { symbolSet } from "../theme.js";
 import { StepFrame } from "../step-frame.js";
 import { rowsFor } from "../../core/status-rows.js";
 import { StatusRow } from "../components/status-row.js";
@@ -17,7 +18,7 @@ import { StatusRow } from "../components/status-row.js";
  * 内容行（Card 的段格式，Section 也逐行渲染同一批）：
  * 手填输入 → 空态引导 → 候选列表，末尾补 pinned / 正在验证 两行状态。
  */
-function contentRows(theme, { state, index, pinned, editing, draft, verifying, verifyResult }) {
+function contentRows(theme, arrow, { state, index, pinned, editing, draft, verifying, verifyResult }) {
   const rows = [];
   const candidates = state.upstream?.candidates ?? [];
 
@@ -51,13 +52,16 @@ function contentRows(theme, { state, index, pinned, editing, draft, verifying, v
       txt("  "),
       txt("先打开你的代理客户端（Clash / Surge / Stash / sing-box 都行）", { dim: true }),
     ]);
-    rows.push([txt("  "), txt("按 m 直接填端口，或回车重新探测", { dim: true })]);
+    // 回车也进手动填写（app.js 的空态分支），r 才是重新探测 —— 文案别撒谎。
+    rows.push([txt("  "), txt("按 m 或回车直接填端口，r 重新探测", { dim: true })]);
   } else {
     const widthName = Math.max(...candidates.map((c) => `${c.host}:${c.port}`.length)) + 2;
+    // 高亮和回车取值用同一个 clamp：探测刷新后列表变短，光标不能停在空气上
+    const cursor = Math.min(Math.max(0, index), Math.max(0, candidates.length - 1));
     candidates.forEach((c, i) => {
       const addr = `${c.host}:${c.port}`;
       const proto = (c.protocols ?? []).join("+") || "未知";
-      rows.push(optionRow(theme, i === index, addr, `${c.label ?? ""} · ${proto}`, widthName));
+      rows.push(optionRow(theme, i === cursor, addr, `${c.label ?? ""} · ${proto}`, widthName, { arrow }));
     });
     rows.push([txt("  ")]);
     rows.push([txt("  "), txt("m 手动填一个端口", { dim: true })]);
@@ -92,7 +96,8 @@ export function UpstreamScreen({
   title = "代理要从哪个端口出去",
 }) {
   const theme = useTheme();
-  const rows = contentRows(theme, {
+  const arrow = symbolSet(useUnicode()).arrow;
+  const rows = contentRows(theme, arrow, {
     state,
     index,
     pinned,

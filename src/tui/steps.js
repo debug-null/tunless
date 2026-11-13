@@ -5,8 +5,9 @@
 // 每一步都要用户自己回车走完（即使状态已经就绪），流程才完整可见。
 
 import { Box, Text } from "ink";
-import { h, Card, txt, segments, useTheme, optionRow } from "./ui.js";
-import { padEnd } from "./width.js";
+import { h, Card, txt, segments, useTheme, useUnicode, optionRow } from "./ui.js";
+import { symbolSet } from "./theme.js";
+import { displayWidth, padEnd } from "./width.js";
 import { actionsFor } from "./app-menu.js";
 import { findApp, codexProxyState } from "../core/apps.js";
 import { StepFrame } from "./step-frame.js";
@@ -25,6 +26,7 @@ export const TOTAL_STEPS = STEP_TITLES.length;
 /** 第 1 步：选工具 */
 export function StepApps({ state, width, index }) {
   const theme = useTheme();
+  const arrow = symbolSet(useUnicode()).arrow;
   const apps = (state.apps ?? []).filter((a) => a.installed);
   const rows = [];
 
@@ -54,6 +56,7 @@ export function StepApps({ state, width, index }) {
           app.name,
           [app.version ?? "", state].filter(Boolean).join(" · ") + proxied,
           nameWidth,
+          { arrow },
         ),
       );
     });
@@ -91,6 +94,7 @@ export function StepUpstream(props) {
 /** 第 3 步：让它走代理 */
 export function StepLaunch({ state, width, index, appName, appId, result, executing, live }) {
   const theme = useTheme();
+  const arrow = symbolSet(useUnicode()).arrow;
   const side = state.sidecar;
   const rows = [];
 
@@ -204,9 +208,12 @@ export function StepLaunch({ state, width, index, appName, appId, result, execut
     rows.push([txt("  "), txt("回车启动转发服务", { dim: true })]);
   } else {
     const actions = actionsFor(app?.id);
-    const labelWidth = Math.max(...actions.map((a) => a.label.length)) + 2;
+    // label 是中文：.length ≠ 显示列数，得按显示宽度算列宽，不然 detail 列对不齐
+    const labelWidth = Math.max(...actions.map((a) => displayWidth(a.label))) + 2;
+    // 高亮和回车取值用同一个 clamp，别出现「高亮消失但回车选中另一项」
+    const cursor = Math.min(Math.max(0, index), Math.max(0, actions.length - 1));
     actions.forEach((action, i) => {
-      rows.push(optionRow(theme, i === index, action.label, action.detail, labelWidth));
+      rows.push(optionRow(theme, i === cursor, action.label, action.detail, labelWidth, { arrow }));
     });
   }
 
