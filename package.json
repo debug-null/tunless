@@ -1,6 +1,6 @@
 {
   "name": "tunless",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "Run AI agents without TUN mode: give proxy-blind tools a working local proxy and keep split-horizon internal domains off the proxy",
   "type": "module",
   "bin": {
@@ -15,6 +15,7 @@
   "files": [
     "bin",
     "src",
+    "docs",
     "README.md",
     "LICENSE"
   ],
