@@ -20,7 +20,6 @@ import {
   StepDone,
   StatusLine,
 } from "../src/tui/steps.js";
-import { RulesPanel, MorePanel } from "../src/tui/rules-panel.js";
 import { Card, kv, txt, ThemeProvider } from "../src/tui/ui.js";
 import { getTheme, detectUnicode, symbolSet, borderSet } from "../src/tui/theme.js";
 import { splitGraphemes } from "../src/tui/width.js";
@@ -119,42 +118,8 @@ test("超长中文按显示宽度截断并加省略号", () => {
 // 总览面板已被仪表盘取代：判词覆盖见 status-rows.test.js，
 // 屏渲染覆盖见 dashboard.test.js / screens.test.js。
 
-test("规则面板显示自动扫描结果与手动规则", async () => {
-  const state = {
-    ...baseState,
-    rules: { domain: ["17usoft.com"], keyword: ["jira"], cidr: ["10.0.0.0/8"] },
-  };
-  const text = await shot(
-    h(Box, { flexDirection: "column", width: 120 }, h(RulesPanel, { state, width: 120, height: 24, scroll: 0 })),
-  );
-  assert.match(text, /自动扫描到的内网域名/);
-  assert.match(text, /17usoft\.com/);
-  assert.match(text, /jira/);
-  assert.match(text, /10\.0\.0\.0\/8/);
-  assert.match(text, /不需要任何授权/);
-});
-
-test("规则输入状态显示当前类型与提示", async () => {
-  const text = await shot(
-    h(
-      Box,
-      { flexDirection: "column", width: 120 },
-      h(RulesPanel, { state: baseState, width: 120, height: 20, editing: "cidr", draft: "10.0.0" }),
-    ),
-  );
-  assert.match(text, /10\.0\.0/);
-  assert.match(text, /IP 段/);
-  assert.match(text, /回车保存/);
-});
-
-test("更多面板收纳程序代理能力与分流后缀", async () => {
-  const text = await shot(
-    h(Box, { flexDirection: "column", width: 120 }, h(MorePanel, { state: baseState, width: 120 })),
-  );
-  assert.match(text, /程序代理能力/);
-  assert.match(text, /antigravity/);
-  assert.match(text, /分流后缀/);
-});
+// 规则面板与「更多」面板已删除：域名规则见 screens.test.js 的 DomainsScreen，
+// 进程代理能力见 service 屏与 doctor。
 
 test("emoji 组合序列按一个字素簇计算宽度", () => {
   // 家族 emoji 由多个码点加 ZWJ 组成，整体只占两列

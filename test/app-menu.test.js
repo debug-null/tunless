@@ -1,8 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import React from "react";
-import { renderToString, Box } from "ink";
-import { AppMenu, ACTIONS, actionsFor } from "../src/tui/app-menu.js";
+import { ACTIONS, actionsFor } from "../src/tui/app-menu.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -13,33 +11,8 @@ import {
   codexProxyState,
 } from "../src/core/apps.js";
 
-const h = React.createElement;
-
-test("第一级菜单列出 Antigravity 和 Cursor，并标出当前选中项", () => {
-  const text = renderToString(
-    h(Box, { flexDirection: "column", width: 120 }, h(AppMenu, { width: 120, index: 1, stage: "app" })),
-  );
-  assert.match(text, /要带代理启动哪个应用/);
-  assert.match(text, /Antigravity/);
-  assert.match(text, /Cursor/);
-  assert.match(text, /回车继续/);
-});
-
-test("第二级菜单让用户选择处理方式，含只写配置不启动", () => {
-  const app = APPS.find((a) => a.name === "Cursor");
-  const text = renderToString(
-    h(
-      Box,
-      { flexDirection: "column", width: 120 },
-      h(AppMenu, { width: 120, stage: "action", app, actionIndex: 0 }),
-    ),
-  );
-  assert.match(text, /Cursor 要怎么处理/);
-  assert.match(text, /只注入代理环境变量后启动/);
-  assert.match(text, /写入代理配置/);
-  assert.match(text, /只写入代理配置，不启动/);
-  assert.match(text, /回车确认/);
-});
+// AppMenu 组件已删除：应用选择/处理方式菜单由 screens/apps.js 渲染，
+// 其渲染覆盖见 screens.test.js；本文件保留 actionsFor/ACTIONS 的行为测试。
 
 test("处理方式覆盖「不改配置」「改配置并启动」「只改配置」三种", () => {
   assert.deepEqual(ACTIONS.map((a) => a.id), ["env", "env+settings", "settings"]);

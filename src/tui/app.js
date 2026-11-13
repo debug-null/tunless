@@ -20,7 +20,6 @@ import {
   StepDomains,
   StepDone,
   StatusLine,
-  TOTAL_STEPS,
 } from "./steps.js";
 import { HelpPanel } from "./help.js";
 import { Dashboard } from "./screens/dashboard.js";
