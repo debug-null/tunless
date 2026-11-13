@@ -12,6 +12,7 @@ import {
   charWidth,
 } from "../src/tui/width.js";
 import { OverviewPanel } from "../src/tui/panels.js";
+import { StepApps, StepLaunch, StepReach, StepDomains, StepDone } from "../src/tui/steps.js";
 import { RulesPanel, MorePanel } from "../src/tui/rules-panel.js";
 import { Card, kv, txt, ThemeProvider } from "../src/tui/ui.js";
 import { getTheme, detectUnicode, symbolSet, borderSet } from "../src/tui/theme.js";
@@ -254,4 +255,76 @@ test("总览面板带提示时也能渲染（回归：cardWidth 提前使用会 
   );
   assert.match(text, /提示/);
   assert.match(text, /完全磁盘访问权限/);
+});
+
+test("向导第 1 步列出已安装的工具", async () => {
+  const text = await shot(
+    h(Box, { flexDirection: "column", width: 120 }, h(StepApps, { state: baseState, width: 120, index: 0 })),
+  );
+  assert.match(text, /第 1 步 \/ 共 4 步/);
+  assert.match(text, /Antigravity/);
+  assert.match(text, /Cursor/);
+  assert.match(text, /回车下一步/);
+});
+
+test("向导第 2 步列出转发服务状态和三种处理方式", async () => {
+  const text = await shot(
+    h(
+      Box,
+      { flexDirection: "column", width: 120 },
+      h(StepLaunch, { state: baseState, width: 120, index: 0, appName: "Antigravity", result: null }),
+    ),
+  );
+  assert.match(text, /第 2 步 \/ 共 4 步/);
+  assert.match(text, /转发服务/);
+  assert.match(text, /只注入代理环境变量后启动/);
+  assert.match(text, /写入代理配置/);
+});
+
+test("向导第 2 步执行后显示结果并提示进入下一步", async () => {
+  const text = await shot(
+    h(
+      Box,
+      { flexDirection: "column", width: 120 },
+      h(StepLaunch, {
+        state: baseState,
+        width: 120,
+        index: 0,
+        appName: "Antigravity",
+        result: "✔ Antigravity 已带代理启动",
+      }),
+    ),
+  );
+  assert.match(text, /已带代理启动/);
+  assert.match(text, /回车进入下一步/);
+});
+
+test("向导第 3 步显示实测结果", async () => {
+  const text = await shot(
+    h(
+      Box,
+      { flexDirection: "column", width: 120 },
+      h(StepReach, { state: baseState, width: 120, reachability: { ok: true, detail: "github.com 经代理返回 200", ms: 700 } }),
+    ),
+  );
+  assert.match(text, /第 3 步 \/ 共 4 步/);
+  assert.match(text, /github\.com 经代理返回 200/);
+});
+
+test("向导第 4 步列出内网域名，收尾页给出结果", async () => {
+  const text = await shot(
+    h(Box, { flexDirection: "column", width: 120 }, h(StepDomains, { state: baseState, width: 120 })),
+  );
+  assert.match(text, /第 4 步 \/ 共 4 步/);
+  assert.match(text, /matrix\.17usoft\.com/);
+
+  const done = await shot(
+    h(
+      Box,
+      { flexDirection: "column", width: 120 },
+      h(StepDone, { state: baseState, width: 120, appName: "Cursor", reachability: { ok: true, detail: "ok" } }),
+    ),
+  );
+  assert.match(done, /全部搞定/);
+  assert.match(done, /Cursor/);
 });

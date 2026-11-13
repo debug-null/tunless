@@ -1,6 +1,8 @@
 // TUI 主程序：基于 ink 的图形界面。
 //
-// 负责整体布局、按键分发，以及刷新／修复／转发／服务／重启等操作。
+// 交互是「向导式」的：一次只做一件事，回车走完这一步再进下一步。
+//   1 选工具 → 2 用代理启动 → 3 测连通 → 4 内网域名 → 完成
+// 之前是一屏四步 + 数字键跳转，跳转本身就让人晕。
 //
 // 主题：启动时用 OSC 11 询问终端背景色，按亮暗切换配色；
 // 终端不支持 Unicode 时符号与边框降级成 ASCII。
@@ -10,55 +12,50 @@ import { render, renderToString, Box, Text, useApp, useInput, useStdout } from "
 import { h, ThemeProvider, useTheme } from "./ui.js";
 import { getTheme, detectUnicode } from "./theme.js";
 import { queryTerminalColorScheme, themeFromEnv } from "./terminal-theme.js";
-import { PANELS, OverviewPanel } from "./panels.js";
+import { OverviewPanel } from "./panels.js";
+import {
+  StepApps,
+  StepLaunch,
+  StepReach,
+  StepDomains,
+  StepDone,
+  TOTAL_STEPS,
+} from "./steps.js";
 import { HelpPanel } from "./help.js";
-import { RulesPanel, MorePanel } from "./rules-panel.js";
-import { AppMenu, ACTIONS } from "./app-menu.js";
+import { ACTIONS } from "./app-menu.js";
 import { APPS } from "../core/apps.js";
 import { addRule, removeRule, saveRules, loadRules, RULE_KINDS } from "../core/rules.js";
-import { isFirstRun, markSeen } from "./first-run.js";
+import { markSeen } from "./first-run.js";
 import { collectState, emptyState } from "./state.js";
 import { startService, stopService } from "../core/launchd.js";
 import { checkReachability } from "../core/reach.js";
-const PANEL_COMPONENTS = {
-  overview: OverviewPanel,
-  rules: RulesPanel,
-  more: MorePanel,
-  help: HelpPanel,
-};
 
-const DEFAULT_HINT = "1 选工具 · 2 用代理启动 · 3 测连通 · 4 内网域名 · a 手写域名 · ← → 换页 · q 退出";
-
-/** 按 l 能依次启动的应用；这些是实际验证过「靠环境变量/配置能走代理」的 */
 export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const theme = useTheme();
 
   const [state, setState] = useState(emptyState);
-  // 第一次运行时先看「怎么用」，避免一头雾水
-  const [panel, setPanel] = useState(() => (isFirstRun() ? "help" : "overview"));
+  // 向导状态：step 是当前第几步，done 是收尾页。
+  const [step, setStep] = useState(1);
+  const [done, setDone] = useState(false);
+  // 第 1 步选中的应用
+  const [appIndex, setAppIndex] = useState(0);
+  const [appName, setAppName] = useState(null);
+  // 第 2 步：选中的处理方式 + 执行结果
+  const [actionIndex, setActionIndex] = useState(0);
+  const [stepResult, setStepResult] = useState(null);
+  // 第 3 步：连通性实测结果
+  const [reach, setReach] = useState(null);
   const [events, setEvents] = useState([]);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState("");
   const [hint, setHint] = useState("");
-  const [scroll, setScroll] = useState(0);
-  const [searching, setSearching] = useState(false);
-  const [query, setQuery] = useState("");
+  const [helpOpen, setHelpOpen] = useState(false);
   // 手动加规则：editing 存规则类型（domain/keyword/cidr），null 表示没在输入
   const [editing, setEditing] = useState(null);
   const [draft, setDraft] = useState("");
   const [ruleIndex, setRuleIndex] = useState(0);
-  // 按 l 弹出的两级菜单：先选应用，再选怎么处理
-  const [appMenu, setAppMenu] = useState(false);
-  const [menuStage, setMenuStage] = useState("app");
-  const [appMenuIndex, setAppMenuIndex] = useState(0);
-  const [actionIndex, setActionIndex] = useState(0);
-  const [pickedApp, setPickedApp] = useState(null);
-  // 第一步选中的工具，界面上要一直显示出来。
-  const [appName, setAppName] = useState(null);
-  // 连通性实测结果单独存，刷新状态时不该被冲掉。
-  const [reach, setReach] = useState(null);
 
   const log = useCallback((text, kind = "info") => {
     const time = new Date().toLocaleTimeString("zh-CN", { hour12: false });
@@ -70,7 +67,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
 
   const refresh = useCallback(async () => {
     setBusy(true);
-    setProgress("正在启动…");
+    setProgress("正在采集…");
     try {
       const next = await collectState({
         internalDns,
@@ -126,36 +123,10 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     await refresh();
   }, [state.sidecar.running, state.sidecar.installed, log, refresh]);
 
-  /**
-   * 实测一次连通性：转发服务在跑 ≠ 外网真的通。
-   * 这一步就是拿一个真实请求走一遍代理隧道。
-   */
-  const runReach = useCallback(async () => {
-    log("正在通过转发服务实测外网…", "info");
-    const result = await checkReachability({ port: state.sidecar.httpPort });
-    setReach(result);
-    log(result.ok ? `连通性正常 — ${result.detail}` : `连通性有问题 — ${result.detail}`, result.ok ? "ok" : "bad");
-    setHint(result.ok ? `外网通了：${result.detail}` : `外网不通：${result.detail}`);
-  }, [state.sidecar.httpPort, log]);
-
-  /** ② 用代理启动：服务没跑就先起服务，跑了就进选应用的菜单 */
-  const stepLaunch = useCallback(async () => {
-    if (!state.sidecar.running) {
-      log("转发服务没在跑，先把它启动…", "info");
-      await runProxy();
-      setHint("转发服务已启动，再按 2 选应用");
-      return;
-    }
-    setAppMenu(true);
-    setMenuStage(pickedApp ? "action" : "app");
-    setActionIndex(0);
-  }, [state.sidecar.running, pickedApp, runProxy]);
-
   const runService = useCallback(async () => {
     log("正在切换转发服务状态…", "info");
     try {
       if (!state.sidecar.installed) {
-        // 还没装成 launchd 服务，先装上（装完自动启动）
         const { cmdService, setQuiet } = await import("../cli.js");
         setQuiet(true);
         await cmdService({ _: ["service", "install"] }, { quiet: true });
@@ -164,7 +135,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       } else if (state.sidecar.running) {
         await stopService();
         log("转发服务已停止", "warn");
-        setHint("转发服务已停止，再按 s 可以重新启动");
+        setHint("转发服务已停止，再按 S 可以重新启动");
       } else {
         await startService();
         log("转发服务已启动", "ok");
@@ -200,41 +171,24 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         { quiet: true },
       );
       log(`${app} 已重启`, "ok");
-      setHint(
-        app === "Cursor"
-          ? "Cursor 已带代理启动，发一条消息试试模型能不能回"
-          : `${app} 已带代理启动`,
-      );
       await refresh();
     },
     [internalDns, includeChrome, log, refresh],
   );
 
-  /**
-   * 按 l 打开应用菜单。
-   * 之前是「按一次换一个」地轮流，用户不知道当前轮到谁；
-   * 改成显式选择后，每次都知道自己要启动的是哪个。
-   */
-  const runLaunch = useCallback(async () => {
-    setAppMenu(true);
-  }, []);
-
-  /** 菜单里选完「应用 + 处理方式」后执行 */
+  /** 第 2 步里执行选中的处理方式 */
   const applyAppAction = useCallback(
     async (app, actionId) => {
-      if (!app) return;
-      setAppName(app.name);
+      if (!app) return null;
       if (actionId === "env") {
         await launchApp(app.name, { writeSettings: false });
-        return;
+        return `${app.name} 已带代理启动`;
       }
       if (actionId === "env+settings") {
         await launchApp(app.name, { writeSettings: true });
-        return;
+        return `${app.name} 已带代理启动，并写入代理配置`;
       }
       if (actionId === "settings") {
-        // 只写配置，不动应用
-        log(`正在写入 ${app.name} 的代理配置…`, "info");
         const { configureCursor, setQuiet } = await import("../cli.js");
         setQuiet(true);
         const result = await configureCursor({
@@ -244,65 +198,28 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
           app,
         });
         if (!result.ok) {
-          log(`${app.name} 配置写入失败`, "bad");
           setHint(`写入失败：${app.name} 的配置文件可能还没生成，先打开一次应用`);
-          return;
+          return null;
         }
-        log(`${app.name} 代理配置已写入`, "ok");
         setHint(`${app.name} 配置已写入，重启应用后生效`);
-        await refresh();
+        return `${app.name} 代理配置已写入`;
       }
+      return null;
     },
-    [launchApp, log, refresh],
+    [launchApp, hint],
   );
 
-  /**
-   * 按 L：直接跳到 Cursor 的「怎么处理」那一步。
-   * 和按 l 一样，写不写配置文件由用户自己选，不替他决定。
-   */
-  const runCursor = useCallback(async () => {
-    const { findApp } = await import("../core/apps.js");
-    setPickedApp(findApp("cursor"));
-    setActionIndex(0);
-    setMenuStage("action");
-    setAppMenu(true);
-  }, []);
-
-  const runAction = useCallback(
-    async (name) => {
-      if (busy) {
-        setHint("正在处理中，请稍候");
-        return;
-      }
-      setBusy(true);
-      setHint("");
-      try {
-        if (name === "refresh") await refresh();
-        else if (name === "fix") await runFix();
-        else if (name === "proxy") await runProxy();
-        else if (name === "service") await runService();
-        else if (name === "launch") await runLaunch();
-        else if (name === "cursor") await runCursor();
-        else if (name === "step-launch") await stepLaunch();
-        else if (name === "reach") await runReach();
-      } catch (err) {
-        log(`操作失败：${err.message}`, "bad");
-      }
-      setBusy(false);
-    },
-    [
-      busy,
-      refresh,
-      runFix,
-      runProxy,
-      runService,
-      runLaunch,
-      runCursor,
-      stepLaunch,
-      runReach,
-      log,
-    ],
-  );
+  /** 第 3 步：真的发一个请求走一遍代理 */
+  const runReach = useCallback(async () => {
+    setProgress("正在实测外网…");
+    const result = await checkReachability({ port: state.sidecar.httpPort });
+    setReach(result);
+    setProgress("");
+    log(
+      result.ok ? `连通性正常 — ${result.detail}` : `连通性有问题 — ${result.detail}`,
+      result.ok ? "ok" : "bad",
+    );
+  }, [state.sidecar.httpPort, log]);
 
   // 首次进入自动采集一次。
   useEffect(() => {
@@ -310,30 +227,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     markSeen();
   }, [refresh]);
 
-  // 每秒刷新一次「更新于」时间显示。
-  useEffect(() => {
-    const timer = setInterval(() => setState((prev) => ({ ...prev })), 1000);
-    return () => clearInterval(timer);
-  }, []);
-
-  /** 切换面板，并复位滚动与搜索 */
-  const switchPanel = useCallback((id) => {
-    setPanel(id);
-    setScroll(0);
-    setHint("");
-  }, []);
-
-  /** 左右方向键在面板之间循环切换 */
-  const cyclePanel = useCallback(
-    (step) => {
-      const index = PANELS.findIndex((p) => p.id === panel);
-      const next = PANELS[(index + step + PANELS.length) % PANELS.length];
-      switchPanel(next.id);
-    },
-    [panel, switchPanel],
-  );
-
-  /** 规则面板里「按顺序能选到」的全部规则，供删除使用 */
+  /** 规则列表（供删除使用） */
   const flatRules = useCallback(() => {
     const rules = state.rules ?? { domain: [], keyword: [], cidr: [] };
     return RULE_KINDS.flatMap((kind) => (rules[kind] ?? []).map((value) => ({ kind, value })));
@@ -356,12 +250,11 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       );
       setHint(
         added
-          ? `已保存 ${rule.value} · 重启转发服务后生效（按 s 两次）`
+          ? `已保存 ${rule.value} · 重启转发服务后生效（按 S 两次）`
           : `${rule.value} 已经在规则里了`,
       );
     } catch (err) {
       setHint(`保存失败：${err.message}`);
-      setEditing(editing);
       return;
     }
     setEditing(null);
@@ -388,48 +281,6 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   }, [flatRules, ruleIndex, log]);
 
   useInput((input, key) => {
-    // 应用菜单：先选应用，再选怎么处理。
-    // 写不写配置文件由用户自己决定，工具不替他改。
-    if (appMenu) {
-      const count = menuStage === "app" ? APPS.length : ACTIONS.length;
-      if (key.escape) {
-        if (menuStage === "action") {
-          setMenuStage("app");
-          return;
-        }
-        setAppMenu(false);
-        setAppMenuIndex(0);
-        return;
-      }
-      if (key.upArrow) {
-        if (menuStage === "app") setAppMenuIndex((i) => Math.max(0, i - 1));
-        else setActionIndex((i) => Math.max(0, i - 1));
-        return;
-      }
-      if (key.downArrow) {
-        if (menuStage === "app") setAppMenuIndex((i) => Math.min(APPS.length - 1, i + 1));
-        else setActionIndex((i) => Math.min(ACTIONS.length - 1, i + 1));
-        return;
-      }
-      if (key.return) {
-        if (menuStage === "app") {
-          setPickedApp(APPS[appMenuIndex]);
-          setAppName(APPS[appMenuIndex].name);
-          setActionIndex(0);
-          setMenuStage("action");
-          return;
-        }
-        const app = pickedApp;
-        const action = ACTIONS[actionIndex];
-        setAppMenu(false);
-        setMenuStage("app");
-        setAppMenuIndex(0);
-        applyAppAction(app, action.id);
-        return;
-      }
-      return;
-    }
-
     // 输入规则：所有按键都进输入框，Tab 在三种类型之间切换
     if (editing) {
       if (key.escape) {
@@ -456,26 +307,9 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       return;
     }
 
-    // 搜索模式：按键全部进入搜索框。
-    if (searching) {
-      if (key.escape) {
-        setSearching(false);
-        setQuery("");
-        setScroll(0);
-        return;
-      }
-      if (key.return) {
-        setSearching(false);
-        return;
-      }
-      if (key.backspace || key.delete) {
-        setQuery((q) => q.slice(0, -1));
-        setScroll(0);
-        return;
-      }
-      if (input && !key.ctrl && !key.meta) {
-        setQuery((q) => q + input);
-        setScroll(0);
+    if (helpOpen) {
+      if (key.escape || input === "h" || input === "?" || key.return) {
+        setHelpOpen(false);
       }
       return;
     }
@@ -484,143 +318,163 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       exit();
       return;
     }
-    // 左右方向键切换面板
-    if (key.leftArrow) {
-      cyclePanel(-1);
-      return;
-    }
-    if (key.rightArrow) {
-      cyclePanel(1);
-      return;
-    }
-    if (key.tab) {
-      cyclePanel(1);
-      return;
-    }
-    if (key.upArrow || input === "k") {
-      if (panel === "rules") {
-        setRuleIndex((i) => Math.max(0, i - 1));
-      } else {
-        setScroll((s) => Math.max(0, s - 1));
-      }
-      return;
-    }
-    if (key.downArrow || input === "j") {
-      if (panel === "rules") {
-        const total = RULE_KINDS.reduce((sum, kind) => sum + ((state.rules?.[kind] ?? []).length), 0);
-        setRuleIndex((i) => Math.min(Math.max(0, total - 1), i + 1));
-      } else {
-        setScroll((s) => s + 1);
-      }
-      return;
-    }
-    if (key.pageUp) {
-      setScroll((s) => Math.max(0, s - 10));
-      return;
-    }
-    if (key.pageDown) {
-      setScroll((s) => s + 10);
-      return;
-    }
-    if (input === "/") {
-      setSearching(true);
-      setQuery("");
-      setScroll(0);
-      return;
-    }
-    // a：任何页面都能直接加内网规则。这是「不想授权也能用」的主入口。
+    // 手动加规则：任何一步都能加，不需要授权。
     if (input === "a") {
       setEditing("domain");
       setDraft("");
       setHint("");
       return;
     }
-    if (input === "d" && panel === "rules") {
-      deleteRule();
-      return;
-    }
-
-    // 数字键 = 四步，不再是切标签页。
-    if (input === "1") {
-      setAppMenu(true);
-      setMenuStage("app");
-      setAppMenuIndex(0);
-      setHint("");
-      return;
-    }
-    if (input === "2") {
-      runAction("step-launch");
-      return;
-    }
-    if (input === "3") {
-      runAction("reach");
-      return;
-    }
-    if (input === "4") {
-      switchPanel("rules");
-      return;
-    }
-    if (input === "m") {
-      switchPanel("more");
-      return;
-    }
     if (input === "h" || input === "?") {
-      switchPanel("help");
+      setHelpOpen(true);
+      return;
+    }
+    if (input === "r") {
+      if (step === 3 && !done) {
+        runReach();
+      } else {
+        refresh();
+      }
+      return;
+    }
+    if (input === "f") {
+      runFix();
+      return;
+    }
+    if (input === "S") {
+      runService();
       return;
     }
 
-    switch (input) {
-      case "r":
-        runAction("refresh");
+    // ---- 向导：每一步只处理自己该处理的东西 --------------------------
+    if (done) {
+      if (key.return) {
+        setDone(false);
+        setStep(1);
+        setStepResult(null);
+        setReach(null);
+      }
+      return;
+    }
+
+    if (step === 1) {
+      const installed = (state.apps ?? []).filter((a) => a.installed);
+      if (key.upArrow) {
+        setAppIndex((i) => Math.max(0, i - 1));
         return;
-      case "f":
-        runAction("fix");
+      }
+      if (key.downArrow) {
+        setAppIndex((i) => Math.min(Math.max(0, installed.length - 1), i + 1));
         return;
-      case "p":
-        runAction("proxy");
+      }
+      if (key.return) {
+        const app = installed[appIndex];
+        if (!app) {
+          setHint("没检测到可用的工具，先装 Antigravity 或 Cursor");
+          return;
+        }
+        setAppName(app.name);
+        setStep(2);
+        setHint("");
+      }
+      return;
+    }
+
+    if (step === 2) {
+      if (key.escape) {
+        setStep(1);
+        setStepResult(null);
         return;
-      // 服务开关：大小写都接受。之前只有大写 S 有效，
-      // 而小写 s 被当成「回到总览」，按下去看起来毫无反应。
-      case "s":
-      case "S":
-        runAction("service");
+      }
+      if (key.upArrow) {
+        setActionIndex((i) => Math.max(0, i - 1));
         return;
-      case "l":
-        setAppMenu(true);
-        setMenuStage("app");
-        setAppMenuIndex(0);
+      }
+      if (key.downArrow) {
+        setActionIndex((i) => Math.min(ACTIONS.length - 1, i + 1));
         return;
-      case "L":
-        runAction("cursor");
+      }
+      if (key.return) {
+        if (stepResult) {
+          // 这一步做完了，等用户自己回车才进下一步
+          setStepResult(null);
+          setStep(3);
+          setHint("");
+          runReach();
+          return;
+        }
+        if (!state.sidecar.running) {
+          runProxy();
+          setHint("转发服务已启动，再按回车选择处理方式");
+          return;
+        }
+        const app = { name: appName };
+        const action = ACTIONS[actionIndex];
+        setBusy(true);
+        applyAppAction(app, action.id)
+          .then((result) => {
+            if (result) setStepResult(`✔ ${result}`);
+          })
+          .catch((err) => setHint(`操作失败：${err.message}`))
+          .finally(() => setBusy(false));
+      }
+      return;
+    }
+
+    if (step === 3) {
+      if (key.escape) {
+        setStep(2);
+        setReach(null);
         return;
-      default:
-        break;
+      }
+      if (key.return) {
+        setStep(4);
+        setHint("");
+      }
+      return;
+    }
+
+    if (step === 4) {
+      if (key.escape) {
+        setStep(3);
+        return;
+      }
+      if (key.return) {
+        setDone(true);
+        setHint("");
+      }
+      if (input === "d") {
+        deleteRule();
+      }
     }
   });
 
   const width = stdout.columns || 80;
   const rows = stdout.rows || 24;
-  const bodyHeight = Math.max(4, rows - 7);
 
-  const PanelComponent = PANEL_COMPONENTS[panel] ?? OverviewPanel;
-  const panelProps = {
-    state,
-    width,
-    height: bodyHeight,
-    scroll,
-    query,
-    events,
-    editing,
-    draft,
-    ruleIndex,
-    appName,
-    reachability: reach,
-  };
-
-  const panelTitle = PANELS.find((p) => p.id === panel)?.name ?? "开始";
+  let body;
+  if (helpOpen) {
+    body = h(HelpPanel, { width });
+  } else if (done) {
+    body = h(StepDone, { state, width, appName, reachability: reach });
+  } else if (step === 1) {
+    body = h(StepApps, { state, width, index: appIndex });
+  } else if (step === 2) {
+    body = h(StepLaunch, {
+      state,
+      width,
+      index: actionIndex,
+      appName,
+      result: stepResult,
+    });
+  } else if (step === 3) {
+    body = h(StepReach, { state, width, reachability: reach });
+  } else {
+    body = h(StepDomains, { state, width });
+  }
 
   const right = busy
-    ? h(Text, { color: theme.colors.warn }, progress || "正在采集…")
+    ? h(Text, { color: theme.colors.warn }, progress || "正在处理…")
     : state.updatedAt
       ? h(
           Text,
@@ -629,18 +483,11 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         )
       : null;
 
-  const helpText = panel === "help" ? "← 回到总览 · r 刷新 · q 退出" : DEFAULT_HINT;
-  const help = appMenu
-    ? h(
-        Text,
-        { dimColor: true },
-        menuStage === "app"
-          ? "回车继续 · ↑↓ 选择 · Esc 取消"
-          : "回车确认 · ↑↓ 选择 · Esc 返回",
-      )
-    : searching
-      ? h(Text, { color: theme.colors.info }, `搜索：${query}▏（回车确认，Esc 取消）`)
-      : h(Text, { dimColor: true }, hint || helpText);
+  const help = h(
+    Text,
+    { dimColor: true },
+    hint || (helpOpen ? "Esc 返回" : "h 看用法 · a 手写内网域名 · r 刷新 · q 退出"),
+  );
 
   return h(
     Box,
@@ -648,26 +495,14 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     h(
       Box,
       { flexDirection: "row", justifyContent: "space-between" },
-      h(
-        Text,
-        { color: theme.colors.accent, bold: true },
-        ` tunless · ${panelTitle} `,
-      ),
-      h(Text, { dimColor: true }, "Agent 免 TUN 联网"),
+      h(Text, { color: theme.colors.accent, bold: true }, " tunless "),
+      h(Text, { dimColor: true }, "给连不上外网的 agent 一个本地代理口，不用开 TUN"),
       right,
     ),
     h(
       Box,
       { flexDirection: "column", flexGrow: 1, overflow: "hidden" },
-      appMenu
-        ? h(AppMenu, {
-            width,
-            index: appMenuIndex,
-            stage: menuStage,
-            app: pickedApp,
-            actionIndex,
-          })
-        : h(PanelComponent, panelProps),
+      body,
     ),
     h(Box, { flexDirection: "column" }, help, h(Text, { dimColor: true }, " ")),
   );
