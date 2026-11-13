@@ -132,7 +132,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
 
   const runFix = useCallback(async () => {
     log("开始诊断并生成修复方案…", "info");
-    const { cmdFix, setQuiet } = await import("../cli.js");
+    const { cmdFix, setQuiet, takeCapturedOutput } = await import("../cli.js");
     setQuiet(true);
     const code = await cmdFix(
       {
@@ -145,7 +145,22 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       },
       { quiet: true },
     );
-    log(code === 0 ? "修复完成" : "修复未完成或已回滚", code === 0 ? "ok" : "warn");
+    // 失败时最要紧的是「为什么」。CLI 的原文攒在缓冲里，不取出来
+    // 界面上就只剩一句没有信息量的「修复未完成」。
+    const detail = takeCapturedOutput();
+    if (code === 0) {
+      log("修复完成", "ok");
+    } else {
+      const reason =
+        detail
+          .split("\n")
+          .map((line) => line.replace(/\x1b\[[0-9;]*m/g, "").trim())
+          .filter((line) => line && !/^──.*──$/.test(line))
+          .slice(-3)
+          .join(" ") || "没有拿到具体原因";
+      log(`修复未完成：${reason}`, "warn");
+      setHint(`修复未完成：${reason}`);
+    }
     await refresh();
   }, [internalDns, includeChrome, log, refresh]);
 

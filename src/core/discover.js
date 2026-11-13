@@ -12,6 +12,13 @@ export const VERGE_DIR = path.join(
   "Library/Application Support/io.github.clash-verge-rev.clash-verge-rev",
 );
 
+// 其他 mihomo 系客户端的配置目录。它们的 API 也能连，只是
+// 「写 DNS 分流」这一步没有 Verge 那种 merge 增强文件可写。
+export const MIHOMO_PARTY_DIR = path.join(
+  home,
+  "Library/Application Support/mihomo-party",
+);
+
 export function exists(p) {
   try {
     fs.accessSync(p);
@@ -117,15 +124,28 @@ export function discoverVerge() {
 
 export function discoverGeneric() {
   const candidates = [];
-  const homeCfg = path.join(home, ".config/mihomo/config.yaml");
-  if (exists(homeCfg)) candidates.push(homeCfg);
-  const clashCfg = path.join(home, ".config/clash/config.yaml");
-  if (exists(clashCfg)) candidates.push(clashCfg);
+  const known = [
+    path.join(home, ".config/mihomo/config.yaml"),
+    path.join(home, ".config/clash/config.yaml"),
+    path.join(MIHOMO_PARTY_DIR, "mihomo.yaml"),
+    path.join(MIHOMO_PARTY_DIR, "config.yaml"),
+  ];
+  for (const file of known) {
+    if (!exists(file)) continue;
+    // mihomo-party 的目录里既有内核参数也有应用自身的设置，后者没有端口、
+    // 只有 UI 偏好。往里写 dns 段会把客户端配置搞坏，所以必须验证这确实是
+    // 一份内核配置（含 mixed-port / port / proxies 之类的字段）。
+    const text = readFileSafe(file) ?? "";
+    if (!looksLikeClashConfig(text)) continue;
+    candidates.push(file);
+  }
 
   const apiCandidates = [{ host: "127.0.0.1", port: 9090, secret: "" }];
   for (const cfg of candidates) {
     const text = readFileSafe(cfg) ?? "";
-    const port = parsePort(text, "external-controller");
+    // mihomo-party 把内核参数写在 mihomo.yaml，应用设置写在 config.yaml；
+    // 两个都读一遍，谁身上有端口就用谁。
+    const port = parsePort(text, "external-controller") ?? parsePort(text, "external-controller-tls");
     if (port) apiCandidates.unshift({ host: "127.0.0.1", port, secret: parseSecret(text) });
   }
 
@@ -136,7 +156,15 @@ export function discoverGeneric() {
     apiCandidates,
     configFiles: candidates,
     configFile: candidates[0] ?? null,
+    mixedPort: null,
   };
+}
+
+export function looksLikeClashConfig(text) {
+  if (!text || text.trim().length < 16) return false;
+  return /^(mixed-port|port|socks-port|external-controller|proxies|proxy-groups|proxy-providers)\s*:/m.test(
+    text,
+  );
 }
 
 export function discoverAll() {

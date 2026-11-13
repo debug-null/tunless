@@ -127,9 +127,11 @@ function rewriteHead(head, { method, path, host }) {
 }
 
 
-// Open a tunnel to the upstream mihomo mixed port. The upstream speaks SOCKS5
-// too, but we already consumed the client's handshake, so we have to run our
-// own against the upstream before piping the payload.
+// Open a tunnel to the upstream proxy.
+//
+// 以前这里写死 SOCKS5 —— 那是 mihomo 混合端口的能力。但 Surge / Stash 这类
+// 只提供 HTTP 代理的客户端没有 SOCKS5，写死会让它们整条链路全废。
+// 所以按上游实际支持的协议挑：有 SOCKS5 用 SOCKS5，否则退到 HTTP CONNECT。
 export async function openUpstreamSocks(upstream, host, port, timeout = 8000) {
   const socket = net.connect(upstream.port, upstream.host);
   await new Promise((resolve, reject) => {
@@ -171,6 +173,56 @@ export async function openUpstreamSocks(upstream, host, port, timeout = 8000) {
   void reply;
   void portBuf;
   return socket;
+}
+
+/** HTTP CONNECT 隧道，用于只支持 HTTP 代理的上游（Surge / Stash / Privoxy） */
+export async function openUpstreamHttp(upstream, host, port, timeout = 8000) {
+  const socket = net.connect(upstream.port, upstream.host);
+  await new Promise((resolve, reject) => {
+    socket.once("connect", resolve);
+    socket.once("error", reject);
+    socket.setTimeout(timeout, () => reject(new Error("上游 HTTP 代理连接超时")));
+  });
+  socket.setTimeout(0);
+
+  socket.write(
+    `CONNECT ${host}:${port} HTTP/1.1\r\nHost: ${host}:${port}\r\nProxy-Connection: keep-alive\r\n\r\n`,
+  );
+  const head = await new Promise((resolve, reject) => {
+    let buffer = Buffer.alloc(0);
+    const onData = (chunk) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      const idx = buffer.indexOf("\r\n\r\n");
+      if (idx === -1) {
+        if (buffer.length > 64 * 1024) reject(new Error("上游响应过长"));
+        return;
+      }
+      socket.off("data", onData);
+      resolve(buffer.subarray(0, idx).toString("utf8"));
+    };
+    socket.on("data", onData);
+    socket.once("error", reject);
+    socket.once("close", () => reject(new Error("上游 HTTP 代理提前关闭连接")));
+  });
+
+  const status = Number(/^HTTP\/1\.[01] (\d{3})/.exec(head.split(CRLF)[0])?.[1] ?? 0);
+  if (!status || status >= 300) {
+    socket.destroy();
+    throw new Error(`上游 HTTP 代理拒绝 CONNECT（${status || "无状态码"}）`);
+  }
+  return socket;
+}
+
+/**
+ * 按上游能力建立隧道。
+ * @param {{host: string, port: number, protocols?: string[]}} upstream
+ */
+export function openUpstreamTunnel(upstream, host, port, timeout = 8000) {
+  const protocols = upstream.protocols ?? ["socks5", "http"];
+  if (protocols.includes("socks5")) {
+    return openUpstreamSocks(upstream, host, port, timeout);
+  }
+  return openUpstreamHttp(upstream, host, port, timeout);
 }
 
 export class HttpProxyServer {
@@ -276,25 +328,47 @@ export class HttpProxyServer {
       return;
     }
 
-    // Upstream route: replay the CONNECT request and forward the upstream's
-    // own response verbatim — answering twice would break the client.
-    const upstreamSocket = net.connect(this.upstream.port, this.upstream.host, () => {
-      upstreamSocket.write(
-        `${head.method} ${head.target} ${head.version || "HTTP/1.1"}\r\n${head.headers
-          .map(([n, v]) => `${n}: ${v}`)
-          .join("\r\n")}\r\n\r\n`,
-      );
-      readHead(upstreamSocket, (text) => {
-        socket.write(`${text}\r\n\r\n`);
-        upstreamSocket.write(rest ?? Buffer.alloc(0));
-        socket.pipe(upstreamSocket);
-        upstreamSocket.pipe(socket);
+    // Upstream route.
+    //
+    // 上游同时支持 HTTP 代理时，直接把 CONNECT 原样转发，最省事也最保真。
+    // 上游只有 SOCKS5（sing-box / v2ray 常见）时，转发是行不通的，得由我们
+    // 自己跑一遍 SOCKS5 握手再回一个 200。
+    const protocols = this.upstream.protocols ?? ["http"];
+    if (protocols.includes("http")) {
+      const upstreamSocket = net.connect(this.upstream.port, this.upstream.host, () => {
+        upstreamSocket.write(
+          `${head.method} ${head.target} ${head.version || "HTTP/1.1"}\r\n${head.headers
+            .map(([n, v]) => `${n}: ${v}`)
+            .join("\r\n")}\r\n\r\n`,
+        );
+        readHead(upstreamSocket, (text) => {
+          socket.write(`${text}\r\n\r\n`);
+          upstreamSocket.write(rest ?? Buffer.alloc(0));
+          socket.pipe(upstreamSocket);
+          upstreamSocket.pipe(socket);
+        });
       });
-    });
-    upstreamSocket.on("error", (err) => {
-      this.log(`CONNECT ${host}:${port} 上游失败：${err.message}`);
-      socket.destroy();
-    });
+      upstreamSocket.on("error", (err) => {
+        this.log(`CONNECT ${host}:${port} 上游失败：${err.message}`);
+        socket.destroy();
+      });
+      socket.on("error", () => upstreamSocket.destroy());
+      return;
+    }
+
+    let upstreamSocket;
+    try {
+      upstreamSocket = await openUpstreamSocks(this.upstream, host, port);
+    } catch (err) {
+      this.log(`CONNECT ${host}:${port} 上游 SOCKS5 失败：${err.message}`);
+      socket.end("HTTP/1.1 502 Bad Gateway\r\n\r\n");
+      return;
+    }
+    socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+    upstreamSocket.write(rest ?? Buffer.alloc(0));
+    socket.pipe(upstreamSocket);
+    upstreamSocket.pipe(socket);
+    upstreamSocket.on("error", () => socket.destroy());
     socket.on("error", () => upstreamSocket.destroy());
   }
 
@@ -323,6 +397,32 @@ export class HttpProxyServer {
     this.log(`GET ${host}:${port} -> ${route}`);
 
     if (route === "upstream") {
+      const protocols = this.upstream.protocols ?? ["http"];
+      // 上游只有 SOCKS5 时不认识绝对 URI 形式的请求，必须先打隧道再
+      // 改成 origin-form 发过去，否则会把签名原样塞给 SOCKS 服务器。
+      if (!protocols.includes("http")) {
+        let tunnel;
+        try {
+          tunnel = await openUpstreamTunnel(this.upstream, host, port);
+        } catch (err) {
+          this.log(`GET ${host}:${port} 上游 SOCKS5 失败：${err.message}`);
+          socket.end("HTTP/1.1 502 Bad Gateway\r\n\r\n");
+          return;
+        }
+        tunnel.write(
+          rewriteHead(head, {
+            method: head.method,
+            path: `${url.pathname}${url.search}`,
+            host: url.host,
+          }),
+        );
+        tunnel.write(rest ?? Buffer.alloc(0));
+        socket.pipe(tunnel);
+        tunnel.pipe(socket);
+        tunnel.on("error", () => socket.destroy());
+        socket.on("error", () => tunnel.destroy());
+        return;
+      }
       const upstreamSocket = net.connect(this.upstream.port, this.upstream.host, () => {
         upstreamSocket.write(
           `${head.method} ${head.target} HTTP/1.1\r\n${head.headers
@@ -459,7 +559,7 @@ export class Socks5Server {
           upstreamSocket.once("error", reject);
         });
       } else {
-        upstreamSocket = await openUpstreamSocks(this.upstream, host, port);
+        upstreamSocket = await openUpstreamTunnel(this.upstream, host, port);
       }
     } catch (err) {
       this.log(`SOCKS5 ${host}:${port} 失败：${err.message}`);

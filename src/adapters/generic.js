@@ -16,7 +16,8 @@ export class GenericAdapter {
   async prepare() {
     if (!this.targetFile) {
       throw new Error(
-        "未找到 mihomo 配置（已查找 ~/.config/mihomo/config.yaml 与 ~/.config/clash/config.yaml）；请用 --config <路径> 指定",
+        "未找到 mihomo 内核配置（已查找 ~/.config/mihomo、~/.config/clash、mihomo-party）；" +
+          "Surge / Stash 这类客户端没有可写的 mihomo 配置，请用 --config <路径> 指定",
       );
     }
     return { file: this.targetFile };

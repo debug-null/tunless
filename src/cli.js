@@ -7,6 +7,16 @@ import path from "node:path";
 import readline from "node:readline";
 import { probeApi } from "./core/api.js";
 import { discoverAll, systemProxyState } from "./core/discover.js";
+import {
+  discoverUpstream,
+  verifyUpstream,
+  describeCandidate,
+  detectClient,
+  loadPinnedUpstream,
+  savePinnedUpstream,
+  clearPinnedUpstream,
+  parseUpstream,
+} from "./core/upstream.js";
 import { classifyDomain } from "./core/dns.js";
 import { dataDir } from "./core/paths.js";
 import { scanAll } from "./core/scan.js";
@@ -169,6 +179,77 @@ async function connect(frontend) {
   return probeApi(frontend.apiCandidates);
 }
 
+/**
+ * 决定用哪个上游代理。
+ *
+ * 顺序是有讲究的：用户明确写的 > 之前钉住的 > 内核 API 报的 > 自动探测。
+ * 自动探测放最后，因为它只能「猜」；但它是唯一不依赖具体客户端的一条路，
+ * 所以对 Surge / Stash / ClashX / mihomo-party 这些用户来说就是唯一的路。
+ */
+export async function resolveUpstream(args = {}) {
+  const explicit = parseUpstream(args.flags?.upstream);
+  if (explicit) {
+    return {
+      upstream: { ...explicit, protocols: ["http", "socks5"] },
+      source: "flag",
+      detail: `命令行指定 ${explicit.host}:${explicit.port}`,
+    };
+  }
+
+  const pinned = loadPinnedUpstream();
+  if (pinned) {
+    const protocols = await import("./core/upstream.js").then((m) =>
+      m.probeProtocols(pinned.host, pinned.port),
+    );
+    if (protocols.length) {
+      return {
+        upstream: { ...pinned, protocols },
+        source: "pinned",
+        detail: `手动指定 ${pinned.host}:${pinned.port}`,
+      };
+    }
+    // 钉住的端口已经不在了：不能默默用别的，否则用户会以为自己配的就是它。
+    return {
+      upstream: null,
+      source: "pinned-dead",
+      detail: `手动指定的 ${pinned.host}:${pinned.port} 现在没有代理在监听`,
+    };
+  }
+
+  let mixedPort = null;
+  try {
+    const frontend = await pickFrontend(args);
+    const conn = await connect(frontend);
+    const cfg = await conn.api.configs();
+    mixedPort = cfg["mixed-port"] ? Number(cfg["mixed-port"]) : null;
+    if (mixedPort) {
+      return {
+        upstream: { host: "127.0.0.1", port: mixedPort, protocols: ["http", "socks5"] },
+        source: "core-api",
+        detail: `${frontend.label} 的混合端口 ${mixedPort}`,
+      };
+    }
+  } catch {
+    // 没有内核 API 很正常，继续走通用探测
+  }
+
+  const found = await discoverUpstream({ mixedPort });
+  if (found.upstream) {
+    return {
+      upstream: found.upstream,
+      source: found.chosen.source,
+      detail: describeCandidate(found.chosen),
+      candidates: found.candidates,
+    };
+  }
+  return {
+    upstream: null,
+    source: "none",
+    detail: "没有找到可用的代理。请先打开你的代理客户端，或运行 tunless upstream set 127.0.0.1:<端口>",
+    candidates: found.candidates,
+  };
+}
+
 function backendDir() {
   return dataDir();
 }
@@ -240,7 +321,16 @@ export async function cmdDoctor(args) {
   say(head("\n── 环境 ──"));
   const frontends = discoverAll();
   const frontend = await pickFrontend(args);
-  say(`  ${info(`客户端：${frontend.label}`)}`);
+  // 只在「没认出 mihomo 系配置」时才用进程名兜底，
+  // 否则会把 Verge 的 merge 文件能力说成别的客户端。
+  const detected = frontend.id === "clash-verge-rev" ? null : await detectClient();
+  const clientLabel = detected?.label ?? frontend.label;
+  say(`  ${info(`客户端：${clientLabel}`)}`);
+  // 认出来了但改不了它的配置，比假装支持要诚实。
+  const canEditConfig = frontend.id === "clash-verge-rev" || Boolean(frontend.configFile);
+  if (!canEditConfig) {
+    say(dim("    不是 mihomo 系：能转发代理，但改不了它的 DNS 分流"));
+  }
 
   let api = null;
   try {
@@ -254,7 +344,8 @@ export async function cmdDoctor(args) {
     for (const f of err.failures ?? []) {
       say(dim(`    ${f.candidate.socketPath ? `unix://${f.candidate.socketPath}` : `http://${f.candidate.host}:${f.candidate.port}`}: ${f.error}`));
     }
-    say(dim("    请先启动代理客户端，然后重新运行 tunless doctor"));
+    say(dim("    这不影响转发：上游代理是按协议实测出来的，不依赖这个接口"));
+    say(dim("    若确实没认出你的代理，运行 tunless upstream set 127.0.0.1:<端口>"));
   }
 
   if (api) {
@@ -284,6 +375,23 @@ export async function cmdDoctor(args) {
     say(`  ${frontend.mergeFile ? ok("已找到 merge 增强文件") : warn("没有 merge 增强文件")}`);
     if (frontend.mergeFile) say(dim(`    ${frontend.mergeFile}`));
     say(`  ${frontend.tunEnabled ? ok("客户端 TUN 开关已开启") : warn("客户端 TUN 开关已关闭")}`);
+  }
+
+  // 上游探测与客户端无关：Surge / Stash / ClashX / sing-box 都走这里。
+  say(head("\n── 上游代理 ──"));
+  const resolved = await resolveUpstream(args);
+  if (resolved.upstream) {
+    const { host, port } = resolved.upstream;
+    say(`  ${ok(`${host}:${port}`)} ${dim(`（${resolved.detail}）`)}`);
+    const check = await verifyUpstream(resolved.upstream);
+    say(`  ${check.ok ? ok("能出网") : warn("此刻出不了网")} ${dim(check.detail)}`);
+  } else {
+    exitCode = 1;
+    say(`  ${bad("没有找到可用的上游代理")}`);
+    say(dim(`    ${resolved.detail}`));
+    for (const c of (resolved.candidates ?? []).slice(0, 8)) {
+      say(dim(`    候选 ${describeCandidate(c)}`));
+    }
   }
 
   say(head("\n── 程序代理能力 ──"));
@@ -400,24 +508,22 @@ export async function cmdProxy(args) {
   const httpPort = Number(args.flags.port || 8899);
   const socksPort = Number(args.flags["socks-port"] ?? 8898);
 
-  let upstream = { host: "127.0.0.1", port: frontend.mixedPort || 7897 };
-  let coreVersion = null;
-
-  if (typeof args.flags.upstream === "string") {
-    const raw = args.flags.upstream.trim();
-    const idx = raw.lastIndexOf(":");
-    upstream = idx === -1
-      ? { host: raw, port: upstream.port }
-      : { host: raw.slice(0, idx), port: Number(raw.slice(idx + 1)) || upstream.port };
+  const resolved = await resolveUpstream(args);
+  if (!resolved.upstream) {
+    say(head("\n── tunless proxy ──\n"));
+    say(`  ${bad("没有可用的上游代理")}`);
+    say(dim(`    ${resolved.detail}`));
+    for (const c of (resolved.candidates ?? []).slice(0, 8)) {
+      say(dim(`    候选 ${describeCandidate(c)}`));
+    }
+    say();
+    return 1;
   }
-  try {
-    const conn = await connect(frontend);
-    const cfg = await conn.api.configs();
-    coreVersion = conn.info.version;
-    if (cfg["mixed-port"]) upstream = { host: "127.0.0.1", port: Number(cfg["mixed-port"]) };
-  } catch (err) {
-    say(`  ${warn(`无法读取内核配置：${err.message}`)}`);
-  }
+  const upstream = {
+    host: resolved.upstream.host,
+    port: resolved.upstream.port,
+    protocols: resolved.upstream.protocols ?? ["http", "socks5"],
+  };
 
   const repoRoots = args.flags.repos
     ? String(args.flags.repos).split(",").map((s) => s.trim()).filter(Boolean)
@@ -434,7 +540,7 @@ export async function cmdProxy(args) {
   ].sort();
 
   say(head("\n── tunless proxy ──\n"));
-  say(`  ${info(`上游内核：${upstream.host}:${upstream.port}${coreVersion ? `（mihomo ${coreVersion}）` : ""}`)}`);
+  say(`  ${info(`上游代理：${upstream.host}:${upstream.port}`)} ${dim(`（${resolved.detail}）`)}`);
   say(`  ${info(`内网域名：${suffixes.length ? suffixes.join("、") : "未检测到"}`)}`);
   say(`  ${ok(`HTTP 代理 ：http://127.0.0.1:${httpPort}`)}`);
   if (socksPort) say(`  ${ok(`SOCKS5 代理：socks5://127.0.0.1:${socksPort}`)}`);
@@ -449,7 +555,9 @@ export async function cmdProxy(args) {
 
   // 只打印 export 语句是不够的：用户从 Dock 点开应用时根本没有这个环境。
   // 把变量写进 launchd 登录会话，所有新启动的 GUI 应用都会带上。
-  if (args.flags["session-env"] !== false) {
+  // 同时认 --session-env=false 与 --no-session-env 两种写法：
+  // 后者是 service install 内部用来关掉它的。
+  if (args.flags["session-env"] !== false && args.flags["no-session-env"] !== true) {
     const sessionEnv = {
       HTTPS_PROXY: `http://127.0.0.1:${httpPort}`,
       HTTP_PROXY: `http://127.0.0.1:${httpPort}`,
@@ -942,6 +1050,89 @@ export async function cmdCursor(args) {
   return 0;
 }
 
+/**
+ * 手动指定 / 查看上游代理。
+ *
+ * 这解决的问题是：自动探测只能认出「已知客户端 + 回环端口」。用户用了个
+ * 我们没见过的客户端、或者代理绑在 127.0.0.2、或者端口是随机的，就必须能
+ * 自己写一句。写下来的端口会存进 ~/.tunless/upstream.json，
+ * launchd 拉起的常驻服务也能读到。
+ */
+export async function cmdUpstream(args) {
+  const action = args._[1] || "status";
+
+  if (action === "set") {
+    const parsed = parseUpstream(args._[2] ?? args.flags.port);
+    if (!parsed) {
+      say(`  ${bad("用法：tunless upstream set 127.0.0.1:7897")}`);
+      return 1;
+    }
+    const protocols = await probeProtocolsSafe(parsed.host, parsed.port);
+    if (!protocols.length) {
+      say(`  ${warn(`${parsed.host}:${parsed.port} 上没有认出代理协议`)}`);
+      say(dim("    仍然会保存。如果是 TUN 下才开放的端口，开着 TUN 再试一次"));
+    }
+    const file = savePinnedUpstream(parsed);
+    say(`\n  ${ok(`已指定上游代理 ${parsed.host}:${parsed.port}`)}`);
+    if (protocols.length) say(dim(`    识别为 ${protocols.join(" + ")}`));
+    say(dim(`    保存于 ${file}`));
+    say(head("\n  让转发服务用上新端口："));
+    say(dim("    tunless service uninstall && tunless service install"));
+    say(dim("    或：tunless upstream clear 恢复自动探测\n"));
+    return 0;
+  }
+
+  if (action === "clear") {
+    const removed = clearPinnedUpstream();
+    say(
+      removed
+        ? `\n  ${ok("已清除手动指定的上游，改回自动探测")}\n`
+        : `\n  ${dim("本来就没有手动指定过上游")}\n`,
+    );
+    return 0;
+  }
+
+  const pinned = loadPinnedUpstream();
+  say(head("\n── 上游代理 ──\n"));
+  if (pinned) {
+    say(`  ${ok(`${pinned.host}:${pinned.port}`)} ${dim("（手动指定）")}`);
+  } else {
+    say(dim("  未手动指定，当前为自动探测"));
+  }
+
+  const resolved = await resolveUpstream({ flags: {} });
+  if (resolved.upstream) {
+    say(`  ${info(`实际使用：${resolved.upstream.host}:${resolved.upstream.port}`)} ${dim(`（${resolved.detail}）`)}`);
+  } else {
+    say(`  ${warn("当前没有可用的上游代理")}`);
+    say(dim(`    ${resolved.detail}`));
+  }
+
+  const found = await discoverUpstream({
+    mixedPort: null,
+    timeoutMs: 800,
+  });
+  if (found.candidates.length) {
+    say(head("\n  本机候选："));
+    for (const c of found.candidates.slice(0, 12)) {
+      const mark = c.isProxy ? paint(C.green, "✔") : paint(C.dim, "·");
+      say(`  ${mark} ${describeCandidate(c)} ${c.process ? dim(`— ${c.process}`) : ""}`);
+    }
+  }
+  say(dim("\n  tunless upstream set 127.0.0.1:7897   # 手动指定"));
+  say(dim("  tunless upstream clear                 # 恢复自动探测\n"));
+  return resolved.upstream ? 0 : 1;
+}
+
+async function probeProtocolsSafe(host, port) {
+  try {
+    const { probeProtocols } = await import("./core/upstream.js");
+    return await probeProtocols(host, port);
+  } catch {
+    return [];
+  }
+}
+
 export async function cmdService(args) {
   /** 生成要写进登录会话的那组代理变量 */
   async function buildSessionEnv(serviceArgs) {
@@ -1023,6 +1214,16 @@ export async function cmdFix(args) {
   const adapter = resolveAdapter(frontend);
 
   say(head(`\n── tunless 修复（${frontend.label}）──\n`));
+
+  // Surge / Stash 这类客户端没有可写的 mihomo 配置。不能先扫完再报错——
+  // 那等于让用户白等一场，还以为工具快成功了。
+  if (frontend.id !== "clash-verge-rev" && !frontend.configFile) {
+    say(`  ${bad("没有找到可写的代理内核配置")}`);
+    say(dim("    这一步只对 mihomo 系客户端有效（Clash Verge / ClashX Meta / mihomo-party）"));
+    say(dim("    你的客户端还能用 tunless proxy：转发照常工作，只是 DNS 分流得在客户端里自己配"));
+    say();
+    return 1;
+  }
 
   const { file: targetFile } = await adapter.prepare();
   const conn = await connect(frontend);
@@ -1209,6 +1410,7 @@ ${head("用法")}
   tunless cursor              给 Cursor 配好代理并带代理重启（专治模型连不上）
   tunless rules [操作]        add | remove | list — 手动补充内网域名/关键词/IP 段
   tunless service <操作>      install | uninstall | status | logs
+  tunless upstream [操作]     status | set <host:port> | clear — 指定上游代理
   tunless restore [序号]      列出配置备份，并还原到指定那份
   tunless env                查看写进登录会话的代理变量（clear 撤销）
 
@@ -1217,6 +1419,7 @@ ${head("选项")}
   --repos <路径>        逗号分隔的仓库根目录，用于扫描域名
   --no-chrome           跳过 Chrome 历史记录（需要完全磁盘访问权限）
   --frontend <id>       指定前端：clash-verge-rev | generic-mihomo
+  --upstream <host:port> 手动指定上游代理（临时覆盖，不落盘）
   --config <路径>       指定配置文件（通用前端）
   --port <n>            HTTP 代理端口（默认 8899）
   --socks-port <n>      SOCKS5 代理端口（默认 8898，设为 0 则禁用）
@@ -1238,6 +1441,7 @@ ${head("示例")}
   tunless cursor
   tunless rules add '+.17usoft.com'
   tunless rules add 10.0.0.0/8
+  tunless upstream set 127.0.0.1:7897
 `;
 
 export async function main(argv) {
@@ -1295,6 +1499,8 @@ export async function main(argv) {
         return await cmdProxy(args);
       case "service":
         return await cmdService(args);
+      case "upstream":
+        return await cmdUpstream(args);
       case "restore":
         return await cmdRestore(args);
       case "env":

@@ -2,6 +2,12 @@
 // 所有探测都是异步且相互独立的，失败不影响其它面板。
 
 import { discoverAll, systemProxyState } from "../core/discover.js";
+import {
+  discoverUpstream,
+  loadPinnedUpstream,
+  describeCandidate,
+  detectClient,
+} from "../core/upstream.js";
 import { probeApi } from "../core/api.js";
 import { classifyDomain } from "../core/dns.js";
 import { scanAll } from "../core/scan.js";
@@ -48,6 +54,12 @@ export function emptyState() {
     frontend: null,
     core: { reachable: false, version: null, error: null, tun: false, mixedPort: null, mode: null },
     systemProxy: null,
+    upstream: {
+      pinned: null,
+      chosen: null,
+      candidates: [],
+      detail: "",
+    },
     sidecar: {
       running: false,
       installed: false,
@@ -94,7 +106,15 @@ export async function collectState({
   const frontends = discoverAll();
   const verge = frontends.find((f) => f.id === "clash-verge-rev" && f.home);
   const frontend = verge ?? frontends[frontends.length - 1];
-  state.frontend = frontend;
+  // 用户可能用 Surge / Stash —— 这些客户端没有可读的 mihomo 配置，
+  // 但进程名能认出来，界面就别再显示「Generic mihomo」了。
+  // 只有「没认出是哪个 mihomo 系」时才用进程名兜底，避免把 Verge 的
+  // merge 文件能力显示成别的客户端。
+  const detected = await detectClient();
+  state.frontend =
+    detected && frontend.id !== "clash-verge-rev"
+      ? { ...frontend, label: detected.label, detected: true }
+      : frontend;
 
   // 内核连通性
   try {
@@ -117,6 +137,21 @@ export async function collectState({
 
   notify("正在检测系统代理…");
   state.systemProxy = await systemProxyState();
+
+  // 上游代理与客户端类型无关：系统代理、已知进程端口、内核混合端口都算候选。
+  notify("正在探测上游代理…");
+  try {
+    state.upstream.pinned = loadPinnedUpstream();
+    const found = await discoverUpstream({
+      mixedPort: state.core.mixedPort,
+      timeoutMs: 900,
+    });
+    state.upstream.candidates = found.candidates.filter((c) => c.isProxy);
+    state.upstream.chosen = found.upstream;
+    state.upstream.detail = found.chosen ? describeCandidate(found.chosen) : "";
+  } catch (err) {
+    state.errors.push(`上游探测失败 — ${err.message}`);
+  }
 
   // 已安装的应用：第一步「选工具」要靠它。
   try {

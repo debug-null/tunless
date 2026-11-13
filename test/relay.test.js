@@ -98,3 +98,92 @@ test("有活跃连接时 stop() 也能立刻停掉", async () => {
   );
   held.destroy();
 });
+
+// 上游只支持 HTTP 代理（Surge / Stash / Privoxy）时，CONNECT 也必须能通。
+// 以前这里写死 SOCKS5，这类用户整条链路全废。
+test("上游只有 HTTP 代理时 CONNECT 依然能用", async () => {
+  const netmod = await import("node:net");
+  const { HttpProxyServer } = await import("../src/core/relay.js");
+
+  const track = (server) => {
+    const sockets = new Set();
+    server.on("connection", (s) => {
+      sockets.add(s);
+      s.on("close", () => sockets.delete(s));
+    });
+    server.closeAll = () => {
+      for (const s of sockets) s.destroy();
+      return new Promise((resolve) => server.close(resolve));
+    };
+    return server;
+  };
+
+  // 本地目标服务：收到数据就回一句，用来验证隧道是双向通的
+  const echo = track(
+    netmod.createServer((socket) => {
+      socket.on("data", () => socket.write("hello-from-target"));
+      socket.on("error", () => {});
+    }),
+  );
+  await new Promise((resolve) => echo.listen(0, "127.0.0.1", resolve));
+  const targetPort = echo.address().port;
+
+  // 假的上游 HTTP 代理：只实现 CONNECT，隧道接到本地 echo。
+  // 只处理一次握手，同一条连接后续的数据交给管道。
+  const proxy = track(
+    netmod.createServer((socket) => {
+      let head = "";
+      const onData = (chunk) => {
+        head += chunk.toString("latin1");
+        if (!head.includes("\r\n\r\n")) return;
+        socket.off("data", onData);
+        const rest = Buffer.from(head.slice(head.indexOf("\r\n\r\n") + 4), "latin1");
+        const target = netmod.connect(targetPort, "127.0.0.1", () => {
+          socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+          if (rest.length) target.write(rest);
+          socket.pipe(target);
+          target.pipe(socket);
+        });
+        target.on("error", () => socket.destroy());
+        socket.on("error", () => target.destroy());
+      };
+      socket.on("data", onData);
+      socket.on("error", () => {});
+    }),
+  );
+  await new Promise((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+  const proxyPort = proxy.address().port;
+
+  const relay = new HttpProxyServer({
+    port: 18902,
+    upstream: { host: "127.0.0.1", port: proxyPort, protocols: ["http"] },
+    log: () => {},
+  });
+  await relay.start();
+
+  const payload = await new Promise((resolve) => {
+    const socket = netmod.connect(18902, "127.0.0.1");
+    let stage = 0;
+    let buf = "";
+    socket.on("connect", () => {
+      socket.write("CONNECT local.test:80 HTTP/1.1\r\nHost: local.test:80\r\n\r\n");
+    });
+    socket.on("data", (chunk) => {
+      if (stage === 0) {
+        buf += chunk.toString("latin1");
+        if (!buf.includes("\r\n\r\n")) return;
+        stage = 1;
+        socket.write("ping");
+        return;
+      }
+      socket.destroy();
+      resolve(chunk.toString());
+    });
+    socket.on("error", (err) => resolve(`error: ${err.code}`));
+  });
+
+  assert.equal(payload, "hello-from-target");
+  await relay.stop();
+  await proxy.closeAll();
+  await echo.closeAll();
+});

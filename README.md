@@ -12,8 +12,15 @@ tunless 把这两件事分开：
    把请求交给已运行的 Clash／mihomo 内核 —— Agent 只要认 `HTTPS_PROXY` 就能用，**不需要 TUN**；
 2. 让内网域名（如 `matrix.17usoft.com`）走直连，不被代理发假 IP 或公网地址。
 
-与具体客户端无关：tunless 通过 REST 接口跟任何运行中的 [mihomo](https://github.com/MetaCubeX/mihomo)
-内核通信，并为 Clash Verge Rev 提供适配器，配置写进订阅更新后仍保留的 merge 增强层。
+**与具体客户端无关**：tunless 不假设你装的是 Clash Verge。它会自动找出本机的上游代理 ——
+优先用 [mihomo](https://github.com/MetaCubeX/mihomo) REST 接口报出的混合端口，
+认不出来就退回 macOS 系统代理（`scutil --proxy`），最后扫本机监听端口并按
+HTTP / SOCKS5 协议实测，只有真的会代理的端口才算数。
+Surge、Stash、ClashX、mihomo-party、sing-box、v2ray 都能直接接上。
+
+只有「写内网 DNS 分流」这一步需要客户端支持：Clash Verge Rev 写当前订阅的 merge 增强层
+（订阅更新后仍保留），其他 mihomo 系直接改配置文件后热重载；不支持的客户端只做转发，
+并明确告诉你哪部分没替你做。
 
 核心逻辑零运行时依赖 —— 诊断、DNS 探测、配置读写全部只用 Node 内置模块。
 图形界面基于 [ink](https://github.com/vadimdemedes/ink) + React 构建（唯一的两个依赖），
@@ -309,7 +316,29 @@ tunless env              # 查看写进登录会话的代理变量（clear 撤�
 | `--no-chrome` | 跳过 Chrome 历史记录（需要完全磁盘访问权限） |
 | `--frontend <id>` | 指定前端：`clash-verge-rev` / `generic-mihomo` |
 | `--config <路径>` | 指定配置文件（通用前端） |
+| `--upstream <host:port>` | 临时指定上游代理，不落盘 |
 | `--yes`, `-y` | 跳过确认提示 |
+
+## 上游代理探测与手动指定
+
+```
+tunless upstream                 # 当前用的是哪个上游，以及本机所有候选
+tunless upstream set 127.0.0.1:7897
+tunless upstream clear           # 回到自动探测
+```
+
+探测顺序：
+
+1. **mihomo REST API** 报告的 `mixed-port`（最准，但只有 mihomo 系有）
+2. **macOS 系统代理**（`scutil --proxy`）—— 任何正经客户端都会设，与前端无关
+3. **本机回环监听端口 + 已知代理进程名**兜底
+
+候选一律按代理协议实测：发 SOCKS5 握手、发一条注定失败的 `CONNECT`，
+只有对方像个代理那样回话才算候选；`CONNECT` 回 `404` 的普通 web 端口会被排除。
+
+自动探测认不出来时（随机端口、绑在非回环地址、我们不认识的客户端），
+`tunless upstream set` 写下的端口存在 `~/.tunless/upstream.json`，
+launchd 拉起的常驻服务重启后也照用。
 
 ## 判定内网域名的依据
 

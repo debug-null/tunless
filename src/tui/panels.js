@@ -167,6 +167,18 @@ export function OverviewPanel({ state, width, appName = null, reachability = nul
   } else {
     envSegments.push(badge("bad", "内核连不上"));
   }
+  // 客户端不认识也没关系：只要系统代理或本机端口能认出代理协议，就还能用。
+  const upstream = state.upstream ?? {};
+  envSegments.push(txt(" · 上游 ", { dim: true }));
+  if (upstream.chosen) {
+    envSegments.push(
+      badge("ok", `${upstream.chosen.host}:${upstream.chosen.port}`),
+    );
+  } else if (upstream.pinned) {
+    envSegments.push(badge("warn", `${upstream.pinned.host}:${upstream.pinned.port} 不可用`));
+  } else {
+    envSegments.push(badge("warn", "没找到代理"));
+  }
   envSegments.push(txt(" · TUN ", { dim: true }));
   envSegments.push(core.tun ? badge("warn", "开着") : badge("ok", "关着"));
   const sys = state.systemProxy;
