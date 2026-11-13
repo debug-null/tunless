@@ -48,7 +48,7 @@ test("StatusRow：选中行有指针", async () => {
     row: { id: "x", status: "ok", label: "服务", detail: "好", action: null },
     selected: true, width: 80,
   })));
-  assert.match(out, /❯/);
+  assert.match(out, /›/);
 });
 
 test("KeyBar：按键提示渲染", async () => {
