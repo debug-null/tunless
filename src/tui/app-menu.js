@@ -47,15 +47,15 @@ export const ACTIONS = [
 export function actionsFor(appId) {
   const app = findApp(appId);
 
-  // Codex 是命令行工具：没有「启动/重启」这回事，
-  // 也没有 settings.json，它只认 ~/.codex/.env。
-  // 所以只留一项，文案也换成它自己的说法。
+  // Codex 有两副面孔：终端命令和桌面客户端（ChatGPT.app），
+  // 但共用同一个 ~/.codex/.env。它没有 settings.json，
+  // 也不存在「带环境变量启动它」这回事（客户端是 GUI）。
   if (app?.id === "codex") {
     return [
       {
         id: "settings",
         label: "写入 ~/.codex/.env",
-        detail: "新开一个终端跑 codex 就生效（会先备份原文件）",
+        detail: "终端 codex 和桌面客户端都读它；客户端要重启后生效",
         envOnlyEnough: true,
       },
       {

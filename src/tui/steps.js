@@ -91,7 +91,7 @@ export function StepApps({ state, width, index }) {
 }
 
 /** 第 2 步：让它走代理 */
-export function StepLaunch({ state, width, index, appName, appId, result, executing }) {
+export function StepLaunch({ state, width, index, appName, appId, result, executing, desktop }) {
   const theme = useTheme();
   const side = state.sidecar;
   const rows = [];
@@ -125,7 +125,7 @@ export function StepLaunch({ state, width, index, appName, appId, result, execut
     const why = {
       antigravity: "模型请求认 HTTPS_PROXY，只注入环境变量就能用",
       cursor: "模型请求不认环境变量代理，必须写 settings.json",
-      codex: "优先读 ~/.codex/.env，会盖掉外面的环境变量",
+      codex: "终端命令和桌面客户端共用 ~/.codex/.env，优先级高于环境变量",
     }[app.id];
     rows.push([
       txt("  "),
@@ -134,18 +134,34 @@ export function StepLaunch({ state, width, index, appName, appId, result, execut
         : txt(`✔ ${app.name}：${why}`, { color: theme.colors.ok }),
     ]);
 
-    // Codex 的 .env 现在指向哪，一眼可见
+    // Codex 的 .env 现在指向哪、客户端现在实际连哪，一眼可见
     if (app.id === "codex") {
       const state = codexProxyState(app);
+      const onTunless = Boolean(state.httpsProxy?.includes(":8899"));
       rows.push([
         txt("  "),
-        txt(padEnd("现在的 .env", 12), { dim: true }),
+        txt(padEnd("配置 .env", 12), { dim: true }),
         state.httpsProxy
-          ? txt(state.httpsProxy, {
-              color: state.httpsProxy.includes(":8899") ? theme.colors.ok : theme.colors.warn,
-            })
+          ? txt(state.httpsProxy, { color: onTunless ? theme.colors.ok : theme.colors.warn })
           : txt("没设置", { dim: true }),
       ]);
+
+      // 配置对了不等于生效：客户端启动时把 .env 读进内存，改完要重启。
+      if (desktop?.pids?.length) {
+        const live = desktop.ports ?? [];
+        const stale = live.length > 0 && !live.includes(8899);
+        rows.push([
+          txt("  "),
+          txt(padEnd("客户端实际", 12), { dim: true }),
+          stale
+            ? txt(`还连着 ${live.map((p) => `127.0.0.1:${p}`).join("、")}，需要重启客户端`, {
+                color: theme.colors.warn,
+              })
+            : live.length
+              ? txt(`已走 127.0.0.1:8899`, { color: theme.colors.ok })
+              : txt("没在跑", { dim: true }),
+        ]);
+      }
     }
     rows.push([txt("  ")]);
   }

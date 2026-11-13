@@ -58,17 +58,20 @@ export const APPS = [
     id: "codex",
     name: "Codex",
     kind: "cli",
-    // Codex 没有 .app，装法有好几种：npm 全局、ChatGPT.app 自带、homebrew。
-    // 这里只认 CLI 本体，用它自己报的版本号。
+    // Codex 有两种形态，但共用同一套配置：
+    //   1. 终端里的 codex 命令（npm / brew 安装）
+    //   2. 桌面客户端 ChatGPT.app（里面内置了一个 codex 二进制跑 app-server）
+    // 两者都是 Rust 程序，都读 CODEX_HOME/.env，所以一份配置同时管两边。
     bin: "codex",
-    // Codex 是 Rust 程序，会解析 HTTP_PROXY/HTTPS_PROXY/ALL_PROXY；
+    desktopBundle: "ChatGPT",
+    // Codex 会解析 HTTP_PROXY/HTTPS_PROXY/ALL_PROXY；
     // 但它启动时还会读 CODEX_HOME/.env，且那个文件的优先级更高 ——
     // 所以光给环境变量会被 .env 里的旧值盖掉，必须同时改 .env。
     envOnlyEnough: false,
     recommendedAction: "env+settings",
     // 配置目录：CODEX_HOME 或 ~/.codex
     configDir: () => process.env.CODEX_HOME || path.join(os.homedir(), ".codex"),
-    description: "用 ~/.codex/.env 里的代理，优先级高于环境变量",
+    description: "终端命令 + 桌面客户端共用 ~/.codex/.env",
   },
 ];
 
@@ -188,6 +191,77 @@ export function applyEnvText(raw, changes) {
   // 保持结尾换行，避免下次读的时候拼在一起
   const text = lines.join("\n");
   return text.endsWith("\n") ? text : `${text}\n`;
+}
+
+/**
+ * Codex 桌面客户端（ChatGPT.app）是否在运行。
+ * 在运行的话，改完 .env 必须重启它才生效 —— 它启动时就把 .env 读进内存了。
+ */
+export async function codexDesktopRunning() {
+  // 不用 pgrep -f：在受限沙箱里它看不到别的进程，改用 ps 全表再过滤。
+  try {
+    const { stdout } = await exec("ps", ["-Ao", "pid=,command="], {
+      timeout: 8000,
+      maxBuffer: 32 * 1024 * 1024,
+    });
+    const pids = stdout
+      .split("\n")
+      .filter((line) => /\/ChatGPT\.app\/Contents\/MacOS\/ChatGPT(\s|$)/.test(line))
+      .map((line) => Number(line.trim().split(/\s+/)[0]))
+      .filter((n) => Number.isFinite(n) && n > 0);
+    return { running: pids.length > 0, pids };
+  } catch {
+    return { running: false, pids: [] };
+  }
+}
+
+/**
+ * 桌面客户端的网络实际由它内部的 codex 子进程（app-server）负责。
+ * 所以要看「客户端现在走哪个代理」，得看这些子进程的连接。
+ */
+export async function codexDesktopProxyPorts() {
+  try {
+    const { stdout } = await exec("ps", ["-Ao", "pid=,command="], {
+      timeout: 8000,
+      maxBuffer: 32 * 1024 * 1024,
+    });
+    const pids = stdout
+      .split("\n")
+      .filter((line) => line.includes("codex-cli/CodexCLI.app/Contents/MacOS/codex"))
+      .map((line) => Number(line.trim().split(/\s+/)[0]))
+      .filter((n) => Number.isFinite(n) && n > 0);
+    const ports = new Set();
+    for (const pid of pids) {
+      const found = await processProxyPort(pid);
+      for (const port of found ?? []) ports.add(port);
+    }
+    return { pids, ports: [...ports] };
+  } catch {
+    return { pids: [], ports: [] };
+  }
+}
+
+/**
+ * 看某个进程现在实际连的是哪个本地代理端口。
+ *
+ * 这是判断「配置改了到底生效没有」最直接的证据：
+ * 配置写的是 8899，但进程还挂着 7897 的连接，就说明它需要重启。
+ */
+export async function processProxyPort(pid) {
+  if (!pid) return null;
+  try {
+    const { stdout } = await exec("lsof", ["-nP", "-p", String(pid)], { timeout: 8000 });
+    const ports = new Set();
+    for (const line of stdout.split("\n")) {
+      // 取「连接目标」那一侧：127.0.0.1:源端口->127.0.0.1:代理端口
+      const m = /->127\.0\.0\.1:(\d+)/.exec(line);
+      if (m) ports.add(Number(m[1]));
+    }
+    // 只关心里程碑端口：7897 这类是 Clash，8899 是 tunless
+    return [...ports];
+  } catch {
+    return null;
+  }
 }
 
 /** Codex .env 里的代理状态 */

@@ -387,3 +387,44 @@ test("状态行：用户触发的动作高亮显示，后台采集用安静的�
   assert.match(background, /后台自动进行/);
   assert.doesNotMatch(background, /⟳/);
 });
+
+test("第 2 步：Codex 配置对了但客户端还连着旧代理时，明确说要重启", async () => {
+  const text = await shot(
+    h(
+      Box,
+      { flexDirection: "column", width: 120 },
+      h(StepLaunch, {
+        state: baseState,
+        width: 120,
+        index: 0,
+        appName: "Codex",
+        appId: "codex",
+        result: null,
+        desktop: { running: true, pids: [1], ports: [7897] },
+      }),
+    ),
+  );
+  assert.match(text, /客户端实际/);
+  assert.match(text, /还连着 127\.0\.0\.1:7897/);
+  assert.match(text, /需要重启客户端/);
+});
+
+test("第 2 步：客户端已经走 8899 时显示已生效", async () => {
+  const text = await shot(
+    h(
+      Box,
+      { flexDirection: "column", width: 120 },
+      h(StepLaunch, {
+        state: baseState,
+        width: 120,
+        index: 0,
+        appName: "Codex",
+        appId: "codex",
+        result: null,
+        desktop: { running: true, pids: [1], ports: [8899] },
+      }),
+    ),
+  );
+  assert.match(text, /已走 127\.0\.0\.1:8899/);
+  assert.doesNotMatch(text, /需要重启客户端/);
+});

@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import React from "react";
 import { renderToString, Box } from "ink";
-import { AppMenu, ACTIONS } from "../src/tui/app-menu.js";
+import { AppMenu, ACTIONS, actionsFor } from "../src/tui/app-menu.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -99,4 +99,28 @@ test("Codex 是 CLI，靠 bin 检测安装而不是 .app bundle", () => {
   assert.ok(codex.bin, "Codex 应该有 bin");
   assert.equal(codex.bundle, undefined, "Codex 没有 .app bundle");
   assert.equal(codex.envOnlyEnough, false, "光给环境变量不够，必须写 .env");
+});
+
+// ---- Codex 有两副面孔：终端命令 + 桌面客户端 ChatGPT.app ----
+
+test("Codex 同时登记了命令行和桌面客户端", () => {
+  const codex = findApp("codex");
+  assert.equal(codex.bin, "codex");
+  assert.equal(codex.desktopBundle, "ChatGPT", "桌面客户端是 ChatGPT.app");
+  // 两者共用一个配置目录
+  assert.ok(codex.configDir().includes(".codex"));
+});
+
+test("Codex 的选项里没有「重启应用」这种对客户端无效的说法", () => {
+  const actions = actionsFor("codex");
+  const labels = actions.map((a) => a.label).join(" ");
+  assert.match(labels, /\.codex\/\.env/);
+  // 客户端是 GUI，没法「带环境变量启动」，所以不该出现这类选项
+  assert.doesNotMatch(labels, /注入代理环境变量后启动/);
+});
+
+test("Codex 的说明提到客户端也要重启才生效", () => {
+  const action = actionsFor("codex").find((a) => a.id === "settings");
+  assert.match(action.detail, /客户端/);
+  assert.match(action.detail, /重启/);
 });

@@ -49,6 +49,8 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const [stepResult, setStepResult] = useState(null);
   // 第 3 步：连通性实测结果
   const [reach, setReach] = useState(null);
+  // Codex 桌面客户端：在跑吗、实际连的是哪个代理端口
+  const [desktop, setDesktop] = useState(null);
   // 用户主动触发的动作（重启应用 / 写配置 / 测连通），走底部状态行
   const [executing, setExecuting] = useState(null);
   const [events, setEvents] = useState([]);
@@ -83,6 +85,15 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         },
       });
       setState(next);
+      // Codex 客户端是否在跑、实际走哪个代理，刷新时一起更新
+      try {
+        const { codexDesktopRunning, codexDesktopProxyPorts } = await import("../core/apps.js");
+        const info = await codexDesktopRunning();
+        const { ports } = info.pids.length ? await codexDesktopProxyPorts() : { ports: [] };
+        setDesktop({ ...info, ports });
+      } catch {
+        setDesktop(null);
+      }
       log(`状态已更新（内网域名 ${next.internalDomains.length} 个）`, "ok");
     } catch (err) {
       log(`刷新失败：${err.message}`, "bad");
@@ -518,6 +529,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       appId,
       result: stepResult,
       executing,
+      desktop,
     });
   } else if (step === 3) {
     body = h(StepReach, { state, width, reachability: reach });
