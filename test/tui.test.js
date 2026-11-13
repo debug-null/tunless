@@ -12,7 +12,15 @@ import {
   charWidth,
 } from "../src/tui/width.js";
 import { OverviewPanel } from "../src/tui/panels.js";
-import { StepApps, StepLaunch, StepReach, StepDomains, StepDone, StatusLine } from "../src/tui/steps.js";
+import {
+  StepApps,
+  StepUpstream,
+  StepLaunch,
+  StepReach,
+  StepDomains,
+  StepDone,
+  StatusLine,
+} from "../src/tui/steps.js";
 import { RulesPanel, MorePanel } from "../src/tui/rules-panel.js";
 import { Card, kv, txt, ThemeProvider } from "../src/tui/ui.js";
 import { getTheme, detectUnicode, symbolSet, borderSet } from "../src/tui/theme.js";
@@ -113,8 +121,9 @@ test("总览面板渲染出关键状态", async () => {
   const text = await shot(
     h(Box, { flexDirection: "column", width: 120 }, h(OverviewPanel, { state: baseState, width: 120 })),
   );
-  assert.match(text, /四步搞定/);
+  assert.match(text, /五步搞定/);
   assert.match(text, /选工具/);
+  assert.match(text, /上游代理/);
   assert.match(text, /用代理启动/);
   assert.match(text, /测连通性/);
   assert.match(text, /内网域名/);
@@ -123,11 +132,11 @@ test("总览面板渲染出关键状态", async () => {
   assert.match(text, /TUN/);
 });
 
-test("四步清单的标题列对齐（中文标题不错位）", async () => {
+test("五步清单的标题列对齐（中文标题不错位）", async () => {
   const text = await shot(
     h(Box, { flexDirection: "column", width: 120 }, h(OverviewPanel, { state: baseState, width: 120 })),
   );
-  const titles = ["选工具", "用代理启动", "测连通性", "内网域名"];
+  const titles = ["选工具", "上游代理", "用代理启动", "测连通性", "内网域名"];
   const starts = titles.map((title) => {
     const line = text
       .split("\n")
@@ -261,13 +270,13 @@ test("向导第 1 步列出已安装的工具", async () => {
   const text = await shot(
     h(Box, { flexDirection: "column", width: 120 }, h(StepApps, { state: baseState, width: 120, index: 0 })),
   );
-  assert.match(text, /第 1 步 \/ 共 4 步/);
+  assert.match(text, /第 1 步 \/ 共 5 步/);
   assert.match(text, /Antigravity/);
   assert.match(text, /Cursor/);
   assert.match(text, /回车下一步/);
 });
 
-test("向导第 2 步列出转发服务状态和三种处理方式", async () => {
+test("向导第 3 步列出转发服务状态和三种处理方式", async () => {
   const text = await shot(
     h(
       Box,
@@ -275,7 +284,7 @@ test("向导第 2 步列出转发服务状态和三种处理方式", async () =>
       h(StepLaunch, { state: baseState, width: 120, index: 0, appName: "Antigravity", result: null }),
     ),
   );
-  assert.match(text, /第 2 步 \/ 共 4 步/);
+  assert.match(text, /第 3 步 \/ 共 5 步/);
   assert.match(text, /转发服务/);
   assert.match(text, /只注入代理环境变量后启动/);
   assert.match(text, /写入代理配置/);
@@ -337,23 +346,108 @@ test("第 2 步按应用过滤选项：Cursor 不给「只注入环境变量」�
   assert.match(cursor, /注入环境变量 \+ 写入代理配置后启动/);
 });
 
-test("向导第 3 步显示实测结果", async () => {
+test("向导第 4 步显示实测结果", async () => {
   const text = await shot(
     h(
       Box,
       { flexDirection: "column", width: 120 },
-      h(StepReach, { state: baseState, width: 120, reachability: { ok: true, detail: "github.com 经代理返回 200", ms: 700 } }),
+      h(StepReach, {
+        state: baseState,
+        width: 120,
+        appName: "Antigravity",
+        reachability: {
+          ok: true,
+          results: [
+            { host: "oauth2.googleapis.com", ok: true, ms: 900, label: "登录换 token" },
+            { host: "cloudcode-pa.googleapis.com", ok: true, ms: 1200, label: "模型接口" },
+          ],
+          failedRequired: [],
+          failedOptional: [],
+        },
+      }),
     ),
   );
-  assert.match(text, /第 3 步 \/ 共 4 步/);
-  assert.match(text, /github\.com 经代理返回 200/);
+  assert.match(text, /第 4 步 \/ 共 5 步/);
+  // 测的是这个工具自己会连的域名，而不是固定的 github
+  assert.match(text, /oauth2\.googleapis\.com/);
+  assert.match(text, /cloudcode-pa\.googleapis\.com/);
+  assert.match(text, /都能经代理访问/);
 });
 
-test("向导第 4 步列出内网域名，收尾页给出结果", async () => {
+test("向导第 2 步让用户先选上游代理，可手动填写", async () => {
+  const withCandidates = {
+    ...baseState,
+    upstream: {
+      pinned: null,
+      chosen: null,
+      detail: "",
+      candidates: [
+        {
+          host: "127.0.0.1",
+          port: 7897,
+          label: "系统代理",
+          protocols: ["socks5", "http"],
+          isProxy: true,
+        },
+        {
+          host: "127.0.0.1",
+          port: 1080,
+          label: "sing-box",
+          protocols: ["socks5"],
+          isProxy: true,
+        },
+      ],
+    },
+  };
+
+  const text = await shot(
+    h(
+      Box,
+      { flexDirection: "column", width: 120 },
+      h(StepUpstream, { state: withCandidates, width: 120, index: 0 }),
+    ),
+  );
+  assert.match(text, /第 2 步 \/ 共 5 步/);
+  assert.match(text, /127\.0\.0\.1:7897/);
+  assert.match(text, /系统代理/);
+  assert.match(text, /127\.0\.0\.1:1080/);
+  assert.match(text, /m 手动填一个端口/);
+
+  // 一个都没探到时，要明确引导用户手动填，而不是显示「没有，放弃吧」
+  const empty = await shot(
+    h(
+      Box,
+      { flexDirection: "column", width: 120 },
+      h(StepUpstream, { state: baseState, width: 120, index: 0 }),
+    ),
+  );
+  assert.match(empty, /没探测到可用的代理/);
+  assert.match(empty, /按 m 直接填端口/);
+});
+
+test("向导第 2 步手动填写模式显示输入框", async () => {
+  const text = await shot(
+    h(
+      Box,
+      { flexDirection: "column", width: 120 },
+      h(StepUpstream, {
+        state: baseState,
+        width: 120,
+        index: 0,
+        editing: true,
+        draft: "127.0.0.1:7897",
+      }),
+    ),
+  );
+  assert.match(text, /代理地址/);
+  assert.match(text, /127\.0\.0\.1:7897/);
+});
+
+test("向导第 5 步列出内网域名，收尾页给出结果", async () => {
   const text = await shot(
     h(Box, { flexDirection: "column", width: 120 }, h(StepDomains, { state: baseState, width: 120 })),
   );
-  assert.match(text, /第 4 步 \/ 共 4 步/);
+  assert.match(text, /第 5 步 \/ 共 5 步/);
   assert.match(text, /matrix\.17usoft\.com/);
 
   const done = await shot(

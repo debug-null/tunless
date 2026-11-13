@@ -21,14 +21,14 @@ function columnsFor(width, ratio) {
 }
 
 /**
- * 总览页：四步清单，数字键直达。
+ * 总览页：五步清单，数字键直达。
  *
  * 之前是「下一步做什么 + 三张状态卡片」，问题是：
  *   · 得先读懂提示才知道该按哪个键
  *   · 状态一变提示就变，键位含义不固定
  *   · 卡片只占 74 列，宽终端下右边空一大片
  *
- * 现在固定四步（选工具 → 用代理启动 → 测连通 → 内网域名），
+ * 现在固定五步（选工具 → 选上游代理 → 用代理启动 → 测连通 → 内网域名），
  * 状态一目了然，卡片铺满终端宽度。
  */
 export function OverviewPanel({ state, width, appName = null, reachability = null }) {
@@ -37,7 +37,7 @@ export function OverviewPanel({ state, width, appName = null, reachability = nul
   const unicode = useUnicode();
   // 卡片铺满终端宽度：之前固定 74 列，宽终端下右边空一大片。
   const cardWidth = Math.max(56, Math.min(width - 2, 110));
-  const stepMarks = unicode ? ["①", "②", "③", "④"] : ["1", "2", "3", "4"];
+  const stepMarks = unicode ? ["①", "②", "③", "④", "⑤"] : ["1", "2", "3", "4", "5"];
 
   const badge = (tone, text) => {
     const symbol = symbols[tone];
@@ -92,29 +92,56 @@ export function OverviewPanel({ state, width, appName = null, reachability = nul
     ),
   );
 
-  // ② 用代理启动
-  const serviceState = statusCell(side.running ? "ok" : "warn", side.running ? "服务在跑" : "服务没跑");
+  // ② 选上游代理
+  const upstream = state.upstream ?? {};
+  const upstreamState = upstream.chosen
+    ? statusCell("ok", "已确定")
+    : upstream.pinned
+      ? statusCell("warn", "不可用")
+      : statusCell("warn", "待选择");
   steps.push(
     stepRow(
       1,
-      "用代理启动",
-      serviceState,
-      side.running
-        ? `HTTP ${side.httpPort} · SOCKS5 ${side.socksPort} · 按 2 选应用`
-        : "按 2 先启动转发服务",
+      "上游代理",
+      upstreamState,
+      upstream.chosen
+        ? `${upstream.chosen.host}:${upstream.chosen.port} · 按 2 更换`
+        : "按 2 选一个代理端口，探不到就手动填",
     ),
   );
 
-  // ③ 测连通性
+  // ③ 用代理启动
+  const serviceState = statusCell(side.running ? "ok" : "warn", side.running ? "服务在跑" : "服务没跑");
+  steps.push(
+    stepRow(
+      2,
+      "用代理启动",
+      serviceState,
+      side.running
+        ? `HTTP ${side.httpPort} · SOCKS5 ${side.socksPort} · 按 3 选应用`
+        : "按 3 先启动转发服务",
+    ),
+  );
+
+  // ④ 测连通性
   const reach = reachability;
   const reachStatus = reach
     ? statusCell(reach.ok ? "ok" : "bad", reach.ok ? "通了" : "不通")
     : statusCell("muted", "没测过");
   steps.push(
-    stepRow(2, "测连通性", reachStatus, reach ? reach.detail : "按 3 实测一次外网"),
+    stepRow(
+      3,
+      "测连通性",
+      reachStatus,
+      reach
+        ? reach.results?.length
+          ? `${reach.results.filter((r) => r.ok).length}/${reach.results.length} 个目标可达`
+          : reach.detail
+        : "按 4 实测这个工具要连的域名",
+    ),
   );
 
-  // ④ 内网域名
+  // ⑤ 内网域名
   const domainStatus = state.loading
     ? statusCell("muted", "扫描中")
     : txt(padEnd(`${state.internalDomains.length} 个`, STATUS_WIDTH), {
@@ -124,14 +151,14 @@ export function OverviewPanel({ state, width, appName = null, reachability = nul
   const needFix = state.fakeCount > 0;
   steps.push(
     stepRow(
-      3,
+      4,
       "内网域名",
       domainStatus,
       state.loading
         ? ""
         : needFix
-          ? `${state.fakeCount} 个还拿到假 IP，按 4 修复`
-          : "解析正常，按 4 查看",
+          ? `${state.fakeCount} 个还拿到假 IP，按 5 修复`
+          : "解析正常，按 5 查看",
     ),
   );
 
@@ -144,10 +171,12 @@ export function OverviewPanel({ state, width, appName = null, reachability = nul
       txt("1", { color: theme.colors.accent, bold: true }),
       txt(" 选工具 · ", { dim: true }),
       txt("2", { color: theme.colors.accent, bold: true }),
-      txt(" 用代理启动 · ", { dim: true }),
+      txt(" 选代理 · ", { dim: true }),
       txt("3", { color: theme.colors.accent, bold: true }),
-      txt(" 测连通 · ", { dim: true }),
+      txt(" 启动 · ", { dim: true }),
       txt("4", { color: theme.colors.accent, bold: true }),
+      txt(" 测连通 · ", { dim: true }),
+      txt("5", { color: theme.colors.accent, bold: true }),
       txt(" 内网域名 · ", { dim: true }),
       txt("a", { color: theme.colors.accent, bold: true }),
       txt(" 手写域名 · ", { dim: true }),
@@ -168,7 +197,6 @@ export function OverviewPanel({ state, width, appName = null, reachability = nul
     envSegments.push(badge("bad", "内核连不上"));
   }
   // 客户端不认识也没关系：只要系统代理或本机端口能认出代理协议，就还能用。
-  const upstream = state.upstream ?? {};
   envSegments.push(txt(" · 上游 ", { dim: true }));
   if (upstream.chosen) {
     envSegments.push(
@@ -196,7 +224,7 @@ export function OverviewPanel({ state, width, appName = null, reachability = nul
   );
   if (manualCount) {
     extraRows.push(
-      kv("手写规则", [txt(`${manualCount} 条`, { bold: true }), txt("  按 4 查看", { dim: true })], 10),
+      kv("手写规则", [txt(`${manualCount} 条`, { bold: true }), txt("  按 5 查看", { dim: true })], 10),
     );
   }
 
@@ -221,7 +249,7 @@ export function OverviewPanel({ state, width, appName = null, reachability = nul
       "  给连不上外网的 agent 一个本地代理口（127.0.0.1:8899），不用开 TUN。",
     ),
     h(Text, null, " "),
-    h(Card, { title: "四步搞定", width: cardWidth, rows: stepRows }),
+    h(Card, { title: "五步搞定", width: cardWidth, rows: stepRows }),
     h(Text, null, " "),
     h(Text, null, ...segments([txt("  环境 ", { dim: true }), ...envSegments], "env")),
     ...extraRows,

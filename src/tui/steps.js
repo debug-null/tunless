@@ -1,7 +1,7 @@
 // 向导式界面：一次只做一件事，做完回车进入下一步。
 //
 // 之前是一屏四个步骤 + 数字键跳转，跳转本身就让人晕。
-// 现在按顺序走：选工具 → 用代理启动 → 测连通 → 内网域名 → 完成。
+// 现在按顺序走：选工具 → 选上游代理 → 用代理启动 → 测连通 → 内网域名 → 完成。
 // 每一步都要用户自己回车走完（即使状态已经就绪），流程才完整可见。
 
 import { Box, Text } from "ink";
@@ -12,6 +12,7 @@ import { findApp, codexProxyState } from "../core/apps.js";
 
 export const STEP_TITLES = [
   "选一个要联网的工具",
+  "代理要从哪个端口出去",
   "让它走 tunless 的代理",
   "实测外网通不通",
   "看看内网域名",
@@ -90,7 +91,106 @@ export function StepApps({ state, width, index }) {
   });
 }
 
-/** 第 2 步：让它走代理 */
+/**
+ * 第 2 步：代理要从哪个端口出去。
+ *
+ * 这一步不能省。以前是自动探测完直接启动，用户根本不知道请求最后落到
+ * 7897 还是 7890，出问题时也没法自己判断是不是选错了端口。
+ *
+ * 列表来自真实探测（系统代理 / mihomo API / 本机监听端口，且都验过协议），
+ * 探测不到就让用户直接写 —— 不要假装「没检测到 = 一定没有」。
+ */
+export function StepUpstream({
+  state,
+  width,
+  index,
+  pinned,
+  editing,
+  draft,
+  verifying,
+  verifyResult,
+}) {
+  const theme = useTheme();
+  const rows = [];
+  const candidates = state.upstream?.candidates ?? [];
+
+  if (editing) {
+    rows.push([
+      txt("  代理地址 ", { bold: true }),
+      txt(draft || "", { color: theme.colors.accent }),
+      txt("█", { color: theme.colors.accent }),
+    ]);
+    rows.push([txt("  ")]);
+    rows.push([
+      txt("  "),
+      txt("回车确认 · Esc 取消 · 例：127.0.0.1:7897", { dim: true }),
+    ]);
+    if (verifyResult) {
+      rows.push([txt("  ")]);
+      rows.push([
+        txt("  "),
+        verifyResult.ok
+          ? txt(`✔ ${verifyResult.detail}`, { color: theme.colors.ok })
+          : txt(`✖ ${verifyResult.detail}`, { color: theme.colors.bad }),
+      ]);
+    }
+    return h(StepFrame, {
+      step: 2,
+      title: STEP_TITLES[1],
+      width,
+      rows,
+      footer: "输入代理的 host:port，回车确认",
+    });
+  }
+
+  if (!candidates.length) {
+    rows.push([txt("  "), txt("没探测到可用的代理", { color: theme.colors.warn })]);
+    rows.push([txt("  ")]);
+    rows.push([
+      txt("  "),
+      txt("先打开你的代理客户端（Clash / Surge / Stash / sing-box 都行）", { dim: true }),
+    ]);
+    rows.push([txt("  "), txt("按 m 直接填端口，或回车重新探测", { dim: true })]);
+  } else {
+    const widthName = Math.max(...candidates.map((c) => `${c.host}:${c.port}`.length)) + 2;
+    candidates.forEach((c, i) => {
+      const addr = `${c.host}:${c.port}`;
+      const proto = (c.protocols ?? []).join("+") || "未知";
+      rows.push(
+        option(
+          theme,
+          i === index,
+          addr,
+          `${c.label ?? ""} · ${proto}`,
+          widthName,
+        ),
+      );
+    });
+    rows.push([txt("  ")]);
+    rows.push([txt("  "), txt("m 手动填一个端口", { dim: true })]);
+  }
+
+  if (pinned) {
+    rows.push([txt("  ")]);
+    rows.push([
+      txt("  "),
+      txt(`当前固定使用 ${pinned.host}:${pinned.port}`, { dim: true }),
+    ]);
+  }
+  if (verifying) {
+    rows.push([txt("  "), txt("正在验证这个代理能不能出网…", { dim: true })]);
+  }
+
+  return h(StepFrame, {
+    step: 2,
+    title: STEP_TITLES[1],
+    width,
+    rows,
+    footer: "↑↓ 选择 · 回车确认 · m 手动填写 · Esc 上一步",
+  });
+}
+
+/** 第 3 步：让它走代理 */
 export function StepLaunch({ state, width, index, appName, appId, result, executing, live }) {
   const theme = useTheme();
   const side = state.sidecar;
@@ -105,6 +205,16 @@ export function StepLaunch({ state, width, index, appName, appId, result, execut
             color: theme.colors.ok,
           })
         : txt("▲ 没在运行", { color: theme.colors.warn }),
+    ],
+    [
+      txt("  "),
+      txt(padEnd("上游代理", 10), { dim: true }),
+      state.upstream?.chosen
+        ? txt(
+            `${state.upstream.chosen.host}:${state.upstream.chosen.port}`,
+            { bold: true },
+          )
+        : txt("没选（会重试自动探测）", { color: theme.colors.warn }),
     ],
     [txt("  ")],
     [
@@ -203,8 +313,8 @@ export function StepLaunch({ state, width, index, appName, appId, result, execut
   }
 
   return h(StepFrame, {
-    step: 2,
-    title: STEP_TITLES[1],
+    step: 3,
+    title: STEP_TITLES[2],
     width,
     rows,
     footer: result
@@ -213,33 +323,89 @@ export function StepLaunch({ state, width, index, appName, appId, result, execut
   });
 }
 
-/** 第 3 步：实测连通性 */
-export function StepReach({ state, width, reachability }) {
+/** 第 4 步：实测连通性 —— 按这个工具自己会连的域名逐个测 */
+export function StepReach({ state, width, reachability, appName, editingTarget, draftTarget }) {
   const theme = useTheme();
   const rows = [];
   const reach = reachability;
 
+  // 手动加测试目标时，整个卡片就是一行输入框
+  if (editingTarget) {
+    rows.push([
+      txt("  测哪个域名？ ", { bold: true }),
+      txt(draftTarget || "", { color: theme.colors.accent }),
+      txt("█", { color: theme.colors.accent }),
+    ]);
+    rows.push([txt("  ")]);
+    rows.push([
+      txt("  "),
+      txt("回车保存 · Esc 取消 · 例：api.example.com:8443/health", { dim: true }),
+    ]);
+    return h(StepFrame, {
+      step: 4,
+      title: STEP_TITLES[3],
+      width,
+      rows,
+      footer: "直接输入，回车保存",
+    });
+  }
+
   if (!reach) {
     rows.push([txt("  "), txt("正在测…", { dim: true })]);
+  } else if (reach.results?.length) {
+    const nameWidth = Math.max(...reach.results.map((r) => r.host.length)) + 2;
+    for (const r of reach.results) {
+      // 可选目标不通时用灰点，避免让用户以为必需目标也挂了
+      const opt = r.optional && !r.ok;
+      const mark = opt
+        ? txt("· ", { dim: true })
+        : r.ok
+          ? txt("✔ ", { color: theme.colors.ok })
+          : txt("✖ ", { color: theme.colors.bad });
+      rows.push([
+        txt("  "),
+        mark,
+        txt(padEnd(r.host, nameWidth)),
+        txt(r.label ?? "", { dim: true }),
+        txt(`  ${r.ms}ms`, { dim: true }),
+      ]);
+    }
+    rows.push([txt("  ")]);
+    if (reach.ok) {
+      rows.push([
+        txt("  "),
+        txt(
+          `${appName ?? "这些目标"}要连的域名都能经代理访问`,
+          { color: theme.colors.ok },
+        ),
+      ]);
+    } else {
+      const failed = (reach.failedRequired ?? []).map((r) => r.host);
+      rows.push([
+        txt("  "),
+        txt(`不通：${failed.join("、") || "未知"}`, { color: theme.colors.bad }),
+      ]);
+      rows.push([
+        txt("  "),
+        txt("先看第 3 步有没有真的把代理注入进去", { dim: true }),
+      ]);
+    }
   } else if (reach.ok) {
     rows.push([txt("  "), txt(`✔ ${reach.detail}`, { color: theme.colors.ok })]);
-    rows.push([txt("  "), txt(`耗时 ${reach.ms}ms`, { dim: true })]);
   } else {
     rows.push([txt("  "), txt(`✖ ${reach.detail}`, { color: theme.colors.bad })]);
-    rows.push([txt("  ")]);
-    rows.push([txt("  "), txt("r 重测 · 回车下一步（不通也可以先往下走）", { dim: true })]);
   }
 
   return h(StepFrame, {
-    step: 3,
-    title: STEP_TITLES[2],
+    step: 4,
+    title: STEP_TITLES[3],
     width,
     rows,
-    footer: "回车下一步 · r 重测 · Esc 上一步",
+    footer: "回车下一步 · r 重测 · t 加一个要测的域名 · Esc 上一步",
   });
 }
 
-/** 第 4 步：内网域名 */
+/** 第 5 步：内网域名 */
 export function StepDomains({ state, width }) {
   const theme = useTheme();
   const domains = state.internalDomains ?? [];
@@ -274,8 +440,8 @@ export function StepDomains({ state, width }) {
   }
 
   return h(StepFrame, {
-    step: 4,
-    title: STEP_TITLES[3],
+    step: 5,
+    title: STEP_TITLES[4],
     width,
     rows,
     footer: "a 手写一条域名 · 回车完成 · Esc 上一步",
@@ -294,14 +460,34 @@ export function StepDone({ state, width, appName, reachability }) {
     [
       txt("  "),
       txt(padEnd("外网", 10), { dim: true }),
-      reachability?.ok
-        ? txt(`✔ ${reachability.detail}`, { color: theme.colors.ok })
-        : txt("没测", { dim: true }),
+      reachability?.results?.length
+        ? reachability.ok
+          ? txt(
+              `✔ ${reachability.results.filter((r) => r.ok).length}/${reachability.results.length} 个目标可达`,
+              { color: theme.colors.ok },
+            )
+          : txt(
+              `✖ ${reachability.failedRequired?.length ?? 0} 个目标不通`,
+              { color: theme.colors.bad },
+            )
+        : reachability?.ok
+          ? txt(`✔ ${reachability.detail}`, { color: theme.colors.ok })
+          : txt("没测", { dim: true }),
     ],
     [
       txt("  "),
       txt(padEnd("内网域名", 10), { dim: true }),
       txt(`${state.internalDomains?.length ?? 0} 个已分流`, { color: theme.colors.ok }),
+    ],
+    [
+      txt("  "),
+      txt(padEnd("外网目标", 10), { dim: true }),
+      reachability?.results?.length
+        ? txt(
+            `${reachability.results.filter((r) => r.ok).length}/${reachability.results.length} 可达`,
+            { color: reachability.ok ? theme.colors.ok : theme.colors.warn },
+          )
+        : txt("没测", { dim: true }),
     ],
     [txt("  ")],
     [txt("  "), txt("回车重新开始 · q 退出", { dim: true })],

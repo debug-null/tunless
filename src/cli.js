@@ -30,6 +30,14 @@ import {
 } from "./core/plan.js";
 import { dumpYaml } from "./core/yaml.js";
 import { HttpProxyServer, Socks5Server } from "./core/relay.js";
+import { checkTargets } from "./core/reach.js";
+import {
+  resolveTargets,
+  parseTarget,
+  addCustomTarget,
+  removeCustomTarget,
+  loadCustomTargets,
+} from "./core/targets.js";
 import { loadRules, ruleSuffixes } from "./core/rules.js";
 import {
   installService,
@@ -208,14 +216,24 @@ export async function resolveUpstream(args = {}) {
         detail: `手动指定 ${pinned.host}:${pinned.port}`,
       };
     }
-    // 钉住的端口已经不在了：不能默默用别的，否则用户会以为自己配的就是它。
+    // 钉住的端口没了（换了客户端、改了端口）。照旧报错只会让用户
+    // 每次开机都得手动改一次；回落到自动探测，但要说明「你选的那个不在了」。
+    const fallback = await resolveUpstreamAuto(args);
     return {
-      upstream: null,
+      ...fallback,
       source: "pinned-dead",
-      detail: `手动指定的 ${pinned.host}:${pinned.port} 现在没有代理在监听`,
+      detail: fallback.upstream
+        ? `${pinned.host}:${pinned.port} 不在了，临时改用 ${fallback.detail}`
+        : `手动指定的 ${pinned.host}:${pinned.port} 现在没有代理在监听，且自动探测也没找到`,
+      pinnedMissing: { host: pinned.host, port: pinned.port },
     };
   }
 
+  return resolveUpstreamAuto(args);
+}
+
+/** 自动探测那一段，单独抽出来给「固定值失效」时复用 */
+async function resolveUpstreamAuto(args = {}) {
   let mixedPort = null;
   try {
     const frontend = await pickFrontend(args);
@@ -1103,6 +1121,10 @@ export async function cmdUpstream(args) {
   const resolved = await resolveUpstream({ flags: {} });
   if (resolved.upstream) {
     say(`  ${info(`实际使用：${resolved.upstream.host}:${resolved.upstream.port}`)} ${dim(`（${resolved.detail}）`)}`);
+    if (resolved.pinnedMissing) {
+      say(`  ${warn(`你固定的 ${resolved.pinnedMissing.host}:${resolved.pinnedMissing.port} 现在没有代理`)}`);
+      say(dim("    已临时回落到自动探测。要更新固定值：tunless upstream set <新端口>"));
+    }
   } else {
     say(`  ${warn("当前没有可用的上游代理")}`);
     say(dim(`    ${resolved.detail}`));
@@ -1131,6 +1153,132 @@ async function probeProtocolsSafe(host, port) {
   } catch {
     return [];
   }
+}
+
+/**
+ * 测外网：默认测「这个工具自己会连的域名」，而不是固定的 github。
+ *
+ * Antigravity 报的是 `Post https://oauth2.googleapis.com/token: i/o timeout`，
+ * 那就该测 oauth2.googleapis.com —— 测 github 通不通说明不了任何问题。
+ */
+export async function cmdTest(args) {
+  const appId = String(args.flags.app ?? args._[1] ?? "").toLowerCase();
+  const { findApp } = await import("./core/apps.js");
+  const app = appId ? findApp(appId) : null;
+  const port = Number(args.flags.port || 8899);
+
+  const targets = resolveTargets(app?.id ?? appId, {
+    includeCustom: args.flags["no-custom"] !== true,
+  });
+  if (!targets.length) {
+    say(`  ${bad("没有要测的目标")}`);
+    return 1;
+  }
+
+  say(head("\n── 测外网 ──\n"));
+  say(
+    `  ${info(
+      app
+        ? `按 ${app.name} 实际会连的域名测`
+        : "没指定工具，测通用目标（加 --app antigravity|cursor|codex 更准）",
+    )}`,
+  );
+  say(dim(`    代理：127.0.0.1:${port}`));
+  say();
+
+  const checked = await checkTargets({ port, targets });
+  const results = checked.results;
+  for (const r of results) {
+    const tag = r.ok ? paint(C.green, "✔") : paint(C.red, "✖");
+    const where = r.port === 443 ? r.host : `${r.host}:${r.port}`;
+    // 可选目标不通时不能显示成红叉 —— 那会让用户以为工具坏了。
+    // 用灰点标记，并在行尾写明「不影响结论」。
+    const opt = r.optional && !r.ok;
+    const mark = opt ? paint(C.dim, "·") : tag;
+    const label = r.label
+      ? dim(`  ${r.label}${opt ? "（可选，不影响结论）" : ""}`)
+      : "";
+    const timing = dim(`  ${r.ms}ms`);
+    say(`  ${mark} ${where.padEnd(38)}${label}${timing}`);
+    if (!r.ok) say(dim(`      ${r.detail}`));
+  }
+
+  say();
+  if (checked.ok) {
+    say(`  ${ok("这些目标都能经代理访问")}`);
+    say(dim("    4xx 也算通 —— 说明请求到了对端，只是这个 URL 不接受 GET"));
+    if (checked.failedOptional.length) {
+      say(dim(`    ${checked.failedOptional.length} 个可选目标没通，不影响结论`));
+    }
+  } else {
+    say(`  ${bad(`${checked.failedRequired.length} 个必需目标不通`)}`);
+    say(dim("    先确认转发服务在跑：tunless service status"));
+  }
+  say();
+  return checked.ok ? 0 : 1;
+}
+
+/** 管理「测外网」用的自定义目标 */
+export async function cmdTargets(args) {
+  const action = args._[1] || "list";
+
+  if (action === "add") {
+    const parsed = parseTarget(args._[2] ?? args.flags.host);
+    if (!parsed) {
+      say(`  ${bad("用法：tunless targets add api.example.com 或 api.example.com:8443/path")}`);
+      return 1;
+    }
+    const { targets, added } = addCustomTarget(parsed);
+    if (!added) {
+      say(`  ${warn(`${parsed.host}:${parsed.port} 已经在列表里`)}`);
+      return 0;
+    }
+    say(`\n  ${ok(`已添加测试目标 ${parsed.host}:${parsed.port}${parsed.path}`)}`);
+    say(dim(`    共 ${targets.length} 个自定义目标`));
+    say(dim("    下次 tunless test 会一起测\n"));
+    return 0;
+  }
+
+  if (action === "remove" || action === "rm") {
+    const raw = String(args._[2] ?? args.flags.host ?? "").trim();
+    const parsed = parseTarget(raw);
+    if (!parsed) {
+      say(`  ${bad("用法：tunless targets remove api.example.com")}`);
+      return 1;
+    }
+    // 不写端口就删这个主机名下所有端口，符合「把这条去掉」的直觉
+    const explicitPort = /:\d+/.test(raw.replace(/^https?:\/\//, "").split("/")[0]);
+    const { removed } = removeCustomTarget(
+      parsed.host,
+      explicitPort ? parsed.port : null,
+    );
+    say(
+      removed
+        ? `\n  ${ok(`已移除 ${parsed.host}${explicitPort ? `:${parsed.port}` : ""}`)}\n`
+        : `\n  ${warn(`没有 ${parsed.host}${explicitPort ? `:${parsed.port}` : ""}`)}\n`,
+    );
+    return removed ? 0 : 1;
+  }
+
+  const custom = loadCustomTargets();
+  say(head("\n── 测试目标 ──\n"));
+  for (const [appId, list] of Object.entries((await import("./core/targets.js")).APP_TARGETS)) {
+    say(`  ${info(appId)}`);
+    for (const t of list) {
+      say(dim(`    ${t.host}${t.port === 443 ? "" : `:${t.port}`}${t.path === "/" ? "" : t.path}  ${t.label ?? ""}`));
+    }
+  }
+  say(`  ${info("自定义")}`);
+  if (!custom.length) {
+    say(dim("    （还没有）"));
+  } else {
+    for (const t of custom) {
+      say(dim(`    ${t.host}${t.port === 443 ? "" : `:${t.port}`}${t.path === "/" ? "" : t.path}`));
+    }
+  }
+  say(dim("\n  tunless targets add api.example.com"));
+  say(dim("  tunless targets remove api.example.com\n"));
+  return 0;
 }
 
 export async function cmdService(args) {
@@ -1411,6 +1559,8 @@ ${head("用法")}
   tunless rules [操作]        add | remove | list — 手动补充内网域名/关键词/IP 段
   tunless service <操作>      install | uninstall | status | logs
   tunless upstream [操作]     status | set <host:port> | clear — 指定上游代理
+  tunless test [应用]         按该应用实际会连的域名测外网
+  tunless targets [操作]      add | remove | list — 自定义测试目标
   tunless restore [序号]      列出配置备份，并还原到指定那份
   tunless env                查看写进登录会话的代理变量（clear 撤销）
 
@@ -1442,6 +1592,8 @@ ${head("示例")}
   tunless rules add '+.17usoft.com'
   tunless rules add 10.0.0.0/8
   tunless upstream set 127.0.0.1:7897
+  tunless test antigravity
+  tunless targets add api.example.com:8443/health
 `;
 
 export async function main(argv) {
@@ -1501,6 +1653,10 @@ export async function main(argv) {
         return await cmdService(args);
       case "upstream":
         return await cmdUpstream(args);
+      case "test":
+        return await cmdTest(args);
+      case "targets":
+        return await cmdTargets(args);
       case "restore":
         return await cmdRestore(args);
       case "env":

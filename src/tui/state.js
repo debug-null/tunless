@@ -147,8 +147,25 @@ export async function collectState({
       timeoutMs: 900,
     });
     state.upstream.candidates = found.candidates.filter((c) => c.isProxy);
-    state.upstream.chosen = found.upstream;
-    state.upstream.detail = found.chosen ? describeCandidate(found.chosen) : "";
+    // 用户已经手动选过就以他为准：刷新一次界面就把他选的换掉，
+    // 会让人以为「我选的没生效」，然后反复重选。
+    const pinned = state.upstream.pinned;
+    if (pinned) {
+      const match = state.upstream.candidates.find(
+        (c) => c.port === pinned.port && c.host === pinned.host,
+      );
+      state.upstream.chosen = {
+        host: pinned.host,
+        port: pinned.port,
+        protocols: match?.protocols ?? ["http", "socks5"],
+      };
+      state.upstream.detail = match
+        ? `${describeCandidate(match)}（已固定）`
+        : `手动固定 ${pinned.host}:${pinned.port}`;
+    } else {
+      state.upstream.chosen = found.upstream;
+      state.upstream.detail = found.chosen ? describeCandidate(found.chosen) : "";
+    }
   } catch (err) {
     state.errors.push(`上游探测失败 — ${err.message}`);
   }

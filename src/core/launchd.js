@@ -212,6 +212,17 @@ export async function startService({ port = 8899, timeoutMs = 10000 } = {}) {
   return serviceStatus();
 }
 
+/**
+ * 重启服务，让新的上游代理设置生效。
+ *
+ * 只 kickstart 是不够的：常驻进程在启动时就把上游端口读进内存了，
+ * 必须真的换成新进程。先 bootout 再 bootstrap，端口才会重新读一次。
+ */
+export async function restartService({ port = 8899, timeoutMs = 15000 } = {}) {
+  await stopService({ timeoutMs: 5000 });
+  return startService({ port, timeoutMs });
+}
+
 /** 停止服务，并等到任务真的从 launchd 里消失，避免界面读到过期的 pid。 */
 export async function stopService({ timeoutMs = 5000 } = {}) {
   await launchctl(["bootout", `${guiDomain()}/${LABEL}`], { ignoreFailure: true });

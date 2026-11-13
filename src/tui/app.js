@@ -15,6 +15,7 @@ import { queryTerminalColorScheme, themeFromEnv } from "./terminal-theme.js";
 import { OverviewPanel } from "./panels.js";
 import {
   StepApps,
+  StepUpstream,
   StepLaunch,
   StepReach,
   StepDomains,
@@ -38,7 +39,14 @@ import { addRule, removeRule, saveRules, loadRules, RULE_KINDS } from "../core/r
 import { markSeen } from "./first-run.js";
 import { collectState, emptyState } from "./state.js";
 import { startService, stopService } from "../core/launchd.js";
-import { checkReachability } from "../core/reach.js";
+import { checkTargets } from "../core/reach.js";
+import { resolveTargets, parseTarget, addCustomTarget } from "../core/targets.js";
+import {
+  verifyUpstream,
+  probeProtocols,
+  parseUpstream,
+  savePinnedUpstream,
+} from "../core/upstream.js";
 
 export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const { exit } = useApp();
@@ -55,9 +63,18 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const [appId, setAppId] = useState(null);
   // 第 2 步：选中的处理方式 + 执行结果
   const [actionIndex, setActionIndex] = useState(0);
+  // 第 2 步：选哪个上游代理（探测出来的候选，或手动填）
+  const [upstreamIndex, setUpstreamIndex] = useState(0);
+  const [editingUpstream, setEditingUpstream] = useState(false);
+  const [draftUpstream, setDraftUpstream] = useState("");
+  const [verifying, setVerifying] = useState(false);
+  const [verifyResult, setVerifyResult] = useState(null);
   const [stepResult, setStepResult] = useState(null);
   // 第 3 步：连通性实测结果
   const [reach, setReach] = useState(null);
+  // 手动加一个「要测的域名」，认不出来的工具/私有网关靠这个
+  const [editingTarget, setEditingTarget] = useState(false);
+  const [draftTarget, setDraftTarget] = useState("");
   // 选中的工具此刻的真实连接：进程在不在、实际连的是哪个本地代理端口。
   // 配置写对了不代表生效了，所以这一步必须看进程，不看文件。
   const [live, setLive] = useState(null);
@@ -368,17 +385,120 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     [launchApp, hint],
   );
 
-  /** 第 3 步：真的发一个请求走一遍代理 */
+  /**
+   * 第 3 步：按这个工具**自己会连的域名**测，而不是固定测 github。
+   * Antigravity 报的是 oauth2.googleapis.com 超时，测 github 通不通没有意义。
+   */
   const runReach = useCallback(async () => {
     setExecuting("正在实测外网…");
-    const result = await checkReachability({ port: state.sidecar.httpPort });
+    const targets = resolveTargets(appId ?? appName);
+    const result = await checkTargets({ port: state.sidecar.httpPort, targets });
     setReach(result);
     setExecuting(null);
+    const okCount = result.results.filter((r) => r.ok).length;
     log(
-      result.ok ? `连通性正常 — ${result.detail}` : `连通性有问题 — ${result.detail}`,
+      result.ok
+        ? `连通性正常 — ${okCount}/${result.results.length} 个目标可达`
+        : `连通性有问题 — ${result.failedRequired.length} 个必需目标不通`,
       result.ok ? "ok" : "bad",
     );
-  }, [state.sidecar.httpPort, log]);
+  }, [state.sidecar.httpPort, appId, appName, log]);
+
+  /**
+   * 选定上游代理后，验证它真的能出网，再进入下一步。
+   *
+   * 只「端口在监听」不够 —— 端口可能是别的服务，或者代理本身连不上节点。
+   * 验证结果写成 state.upstream.chosen，启动那一步和界面都读它。
+   */
+  const adoptUpstream = useCallback(
+    async (candidate) => {
+      const upstream = {
+        host: candidate.host,
+        port: candidate.port,
+        protocols: candidate.protocols ?? ["http", "socks5"],
+      };
+      setVerifying(true);
+      setVerifyResult(null);
+      setState((prev) => ({
+        ...prev,
+        upstream: {
+          ...prev.upstream,
+          chosen: upstream,
+          detail: `${candidate.label ?? "手动选择"} · ${(candidate.protocols ?? []).join("+") || "未知协议"}`,
+        },
+      }));
+
+      const check = await verifyUpstream(upstream).catch((err) => ({
+        ok: false,
+        detail: err.message,
+      }));
+      setVerifying(false);
+      setVerifyResult({ ...check, upstream });
+
+      if (!check.ok) {
+        log(`${candidate.host}:${candidate.port} 出不了网 — ${check.detail}`, "bad");
+        setHint(
+          `这个端口像是代理，但连不上外网（${check.detail}）。可以换一个，或按 m 手动填`,
+        );
+        return;
+      }
+
+      // 真正生效要落盘：常驻服务是 launchd 拉起来的，拿不到当前界面的选择。
+      try {
+        savePinnedUpstream({ host: upstream.host, port: upstream.port });
+        log(`上游代理已固定为 ${upstream.host}:${upstream.port}`, "ok");
+      } catch (err) {
+        log(`保存上游代理失败：${err.message}`, "warn");
+      }
+
+      // 已经在跑的服务还连着旧端口。不重启的话，下一步「启动应用」看起来
+      // 一切正常，但流量仍然从旧上游出去 —— 用户改了设置却没生效。
+      if (state.sidecar.installed) {
+        setExecuting("正在让转发服务改用新上游…");
+        try {
+          const { restartService } = await import("../core/launchd.js");
+          await restartService();
+          log("转发服务已重启，改用新的上游", "ok");
+        } catch (err) {
+          log(`重启转发服务失败：${err.message}`, "warn");
+          setHint(`上游已保存，但转发服务没重启成功：${err.message}`);
+        } finally {
+          setExecuting(null);
+        }
+      }
+
+      setStep(3);
+      setHint("");
+      setActionIndex(0);
+      log(`上游代理：${upstream.host}:${upstream.port} — 能出网`, "ok");
+      refreshLive(appId);
+    },
+    [appId, log, refreshLive, state.sidecar.installed],
+  );
+
+  /** 手动填写上游端口：先探测协议，再走同一套验证 */
+  const confirmUpstream = useCallback(
+    async (raw) => {
+      const parsed = parseUpstream(raw);
+      if (!parsed) {
+        setHint("格式不对，应该是 127.0.0.1:7897 这样");
+        return;
+      }
+      const protocols = await probeProtocols(parsed.host, parsed.port).catch(() => []);
+      if (!protocols.length) {
+        setVerifyResult({
+          ok: false,
+          detail: `${parsed.host}:${parsed.port} 上没有认出代理协议`,
+        });
+        setHint("这个端口不像代理。TUN 模式下的端口可能只对系统可见，换个端口试试");
+        return;
+      }
+      setEditingUpstream(false);
+      setDraftUpstream("");
+      await adoptUpstream({ ...parsed, protocols, label: "手动填写" });
+    },
+    [adoptUpstream],
+  );
 
   // 首次进入自动采集一次。
   useEffect(() => {
@@ -440,6 +560,40 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   }, [flatRules, ruleIndex, log]);
 
   useInput((input, key) => {
+    // 输入自定义测试目标
+    if (editingTarget) {
+      if (key.escape) {
+        setEditingTarget(false);
+        setDraftTarget("");
+        return;
+      }
+      if (key.return) {
+        const parsed = parseTarget(draftTarget);
+        if (!parsed) {
+          setHint("看不懂这个地址，试试 api.example.com 或 api.example.com:8443/path");
+          return;
+        }
+        const { added } = addCustomTarget(parsed);
+        setEditingTarget(false);
+        setDraftTarget("");
+        setHint(
+          added
+            ? `已添加 ${parsed.host}，重新测一次看结果`
+            : `${parsed.host} 已经在列表里了`,
+        );
+        setTimeout(runReach, 0);
+        return;
+      }
+      if (key.backspace || key.delete) {
+        setDraftTarget((v) => v.slice(0, -1));
+        return;
+      }
+      if (input && !key.ctrl && !key.meta) {
+        setDraftTarget((v) => v + input);
+      }
+      return;
+    }
+
     // 输入规则：所有按键都进输入框，Tab 在三种类型之间切换
     if (editing) {
       if (key.escape) {
@@ -489,7 +643,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       return;
     }
     if (input === "r") {
-      if (step === 3 && !done) {
+      if (step === 4 && !done) {
         runReach();
       } else {
         refresh();
@@ -539,15 +693,77 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         setActionIndex(0);
         setStep(2);
         setHint("");
-        // 进第 2 步就去看这个工具此刻的真实连接，别等用户问「到底生效没」
-        refreshLive(app.id);
+        // 探测出来的第一个候选就是默认选中项，用户直接回车即可
+        setUpstreamIndex(0);
+        setVerifyResult(null);
       }
       return;
     }
 
     if (step === 2) {
+      // ---- 选上游代理：先确定「代理谁」，再谈怎么启动 ----------------
+      if (editingUpstream) {
+        if (key.escape) {
+          setEditingUpstream(false);
+          setDraftUpstream("");
+          setVerifyResult(null);
+          return;
+        }
+        if (key.return) {
+          confirmUpstream(draftUpstream);
+          return;
+        }
+        if (key.backspace || key.delete) {
+          setDraftUpstream((v) => v.slice(0, -1));
+          return;
+        }
+        if (input && !key.ctrl && !key.meta) {
+          setDraftUpstream((v) => v + input);
+        }
+        return;
+      }
       if (key.escape) {
         setStep(1);
+        setVerifyResult(null);
+        return;
+      }
+      if (input === "m") {
+        setEditingUpstream(true);
+        setDraftUpstream(
+          state.upstream?.chosen
+            ? `${state.upstream.chosen.host}:${state.upstream.chosen.port}`
+            : "127.0.0.1:",
+        );
+        setVerifyResult(null);
+        return;
+      }
+      const candidates = state.upstream?.candidates ?? [];
+      if (key.upArrow) {
+        setUpstreamIndex((i) => Math.max(0, i - 1));
+        return;
+      }
+      if (key.downArrow) {
+        setUpstreamIndex((i) => Math.min(Math.max(0, candidates.length - 1), i + 1));
+        return;
+      }
+      if (key.return) {
+        const chosen = candidates[upstreamIndex];
+        if (!chosen) {
+          // 一个都没探到：直接进手动填写，而不是让用户卡在这
+          setEditingUpstream(true);
+          setDraftUpstream("127.0.0.1:");
+          setHint("没探测到代理，手动填一个端口");
+          return;
+        }
+        adoptUpstream(chosen);
+        return;
+      }
+      return;
+    }
+
+    if (step === 3) {
+      if (key.escape) {
+        setStep(2);
         setStepResult(null);
         return;
       }
@@ -564,7 +780,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         if (stepResult) {
           // 这一步做完了，等用户自己回车才进下一步
           setStepResult(null);
-          setStep(3);
+          setStep(4);
           setHint("");
           runReach();
           return;
@@ -624,22 +840,28 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       return;
     }
 
-    if (step === 3) {
+    if (step === 4) {
+      if (input === "t") {
+        setEditingTarget(true);
+        setDraftTarget("");
+        setHint("");
+        return;
+      }
       if (key.escape) {
-        setStep(2);
+        setStep(3);
         setReach(null);
         return;
       }
       if (key.return) {
-        setStep(4);
+        setStep(5);
         setHint("");
       }
       return;
     }
 
-    if (step === 4) {
+    if (step === 5) {
       if (key.escape) {
-        setStep(3);
+        setStep(4);
         return;
       }
       if (key.return) {
@@ -663,6 +885,17 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   } else if (step === 1) {
     body = h(StepApps, { state, width, index: appIndex });
   } else if (step === 2) {
+    body = h(StepUpstream, {
+      state,
+      width,
+      index: upstreamIndex,
+      pinned: state.upstream?.pinned,
+      editing: editingUpstream,
+      draft: draftUpstream,
+      verifying,
+      verifyResult,
+    });
+  } else if (step === 3) {
     body = h(StepLaunch, {
       state,
       width,
@@ -673,8 +906,15 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       executing,
       live,
     });
-  } else if (step === 3) {
-    body = h(StepReach, { state, width, reachability: reach });
+  } else if (step === 4) {
+    body = h(StepReach, {
+      state,
+      width,
+      reachability: reach,
+      appName,
+      editingTarget,
+      draftTarget,
+    });
   } else {
     body = h(StepDomains, { state, width });
   }
@@ -684,7 +924,18 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const help = h(
     Text,
     { dimColor: true },
-    hint || (helpOpen ? "Esc 返回" : "h 看用法 · a 手写内网域名 · r 刷新 · q 退出"),
+    hint ||
+      (editingTarget
+        ? "回车保存 · Esc 取消"
+        : editingUpstream
+          ? "回车确认 · Esc 取消"
+          : step === 2 && !done
+            ? "↑↓ 选代理 · 回车确认 · m 手动填 · q 退出"
+            : step === 4 && !done
+              ? "r 重测 · t 加一个要测的域名 · 回车下一步"
+              : helpOpen
+                ? "Esc 返回"
+                : "h 看用法 · a 手写内网域名 · r 刷新 · q 退出"),
   );
 
   return h(
