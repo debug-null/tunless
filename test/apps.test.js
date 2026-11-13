@@ -94,3 +94,28 @@ test("quitApp 对未运行的应用直接返回成功", async () => {
   assert.equal(result.pid, null);
   assert.equal(result.escalated, false);
 });
+
+test("parseProxyPorts：只认真正的代理端口，忽略应用自身 IPC", async () => {
+  const { parseProxyPorts } = await import("../src/core/apps.js");
+  // 真实 lsof 输出的列布局：COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
+  const lsof = [
+    "language_ 23236 apple    7u  IPv4 0xa42c 0t0 TCP 127.0.0.1:54310 (LISTEN)",
+    "language_ 23236 apple    9u  IPv4 0xbd20 0t0 TCP 127.0.0.1:54617->127.0.0.1:8899 (ESTABLISHED)",
+    "language_ 23236 apple  304u  IPv4 0x8ca8 0t0 TCP 127.0.0.1:54310->127.0.0.1:54321 (ESTABLISHED)",
+    "language_ 23236 apple  305u  IPv4 0x5144 0t0 TCP 127.0.0.1:54335->127.0.0.1:8899 (ESTABLISHED)",
+    "Antigravi 23295 apple   22u  IPv4 0x5297 0t0 TCP 127.0.0.1:54344->127.0.0.1:54368 (ESTABLISHED)",
+    "Other     99999 apple   1u  IPv4 0xdead 0t0 TCP 127.0.0.1:50000->127.0.0.1:7897 (ESTABLISHED)",
+  ].join("\n");
+
+  assert.deepEqual(parseProxyPorts(lsof, [23236, 23295]), [8899]);
+  assert.deepEqual(parseProxyPorts(lsof, []), []);
+});
+
+test("parseProxyPorts：Clash 端口也能认出来，不被临时端口规则误杀", async () => {
+  const { parseProxyPorts } = await import("../src/core/apps.js");
+  const lsof = [
+    "codex 66666 apple 1u IPv4 0x1 0t0 TCP 127.0.0.1:50123->127.0.0.1:7897 (ESTABLISHED)",
+    "codex 66666 apple 2u IPv4 0x2 0t0 TCP 127.0.0.1:50124->127.0.0.1:52345 (ESTABLISHED)",
+  ].join("\n");
+  assert.deepEqual(parseProxyPorts(lsof, [66666]), [7897]);
+});

@@ -228,10 +228,13 @@ export async function codexDesktopRunning() {
 export async function appProxyPorts(app) {
   if (!app) return { pids: [], ports: [] };
 
+  // 注意：不能只匹配主进程。真正联网的往往是子进程 ——
+  // Antigravity 的 language_server、Cursor 的 Plugin Helper 都在 .app 目录下，
+  // 只盯 MainOS/<Bundle> 会永远得到「没有代理连接」这个假结论。
   const targets =
     app.id === "codex"
       ? ["codex-cli/CodexCLI.app/Contents/MacOS/codex"]
-      : [`${app.bundle}.app/Contents/MacOS/${app.bundle}`];
+      : [`/Applications/${app.bundle}.app/`];
 
   try {
     const { stdout } = await exec("ps", ["-Ao", "pid=,command="], {
@@ -244,15 +247,70 @@ export async function appProxyPorts(app) {
       .map((line) => Number(line.trim().split(/\s+/)[0]))
       .filter((n) => Number.isFinite(n) && n > 0);
 
-    const ports = new Set();
-    for (const pid of pids) {
-      const found = await processProxyPort(pid);
-      for (const port of found ?? []) ports.add(port);
-    }
-    return { pids, ports: [...ports] };
+    return { pids, ports: await proxyPortsForPids(pids) };
   } catch {
     return { pids: [], ports: [] };
   }
+}
+
+/**
+ * 一次 lsof 取回所有进程的已建立连接，再按 pid 过滤。
+ * 逐个 pid 调 lsof 在 Electron 应用上要跑十几次，慢到界面会卡住。
+ */
+export async function proxyPortsForPids(pids) {
+  if (!pids?.length) return [];
+  try {
+    const { stdout } = await exec("lsof", ["-nP", "-iTCP"], {
+      timeout: 15000,
+      maxBuffer: 32 * 1024 * 1024,
+    });
+    return parseProxyPorts(stdout, pids);
+  } catch {
+    return [];
+  }
+}
+
+/** 常见本地代理端口：Clash 系列、tunless、通用 SOCKS/HTTP 端口。 */
+const KNOWN_PROXY_PORTS = new Set([7897, 7890, 7891, 8899, 8898, 1080, 1087, 10808, 8080, 8888]);
+
+/**
+ * 从 `lsof -nP -iTCP` 的输出里挑出「连到本地代理」的端口号。
+ *
+ * 这里要过滤两类噪音，否则 Electron 应用会把界面骗了：
+ *   1. 应用自己监听的端口（language_server 的 54310 之类）——内部 IPC；
+ *   2. 随机临时端口上的内部回环连接（macOS 临时端口从 49152 起）。
+ * 只看这些会把 `unknown` 说成「没走代理」，或者干脆报一堆假端口。
+ */
+export function parseProxyPorts(lsofOutput, pids) {
+  const wanted = new Set(pids ?? []);
+  if (!wanted.size) return [];
+
+  const ownPorts = new Set();
+  const rows = [];
+  for (const line of String(lsofOutput).split("\n")) {
+    const cols = line.trim().split(/\s+/);
+    if (cols.length < 9) continue;
+    const pid = Number(cols[1]);
+    if (!wanted.has(pid)) continue;
+    rows.push(cols);
+    // 应用自己监听的端口是内部 IPC，不是代理
+    if ((cols[9] ?? "").startsWith("(LISTEN)")) {
+      const local = /:(\d+)$/.exec(cols[8] ?? "");
+      if (local) ownPorts.add(Number(local[1]));
+    }
+  }
+
+  const ports = new Set();
+  for (const cols of rows) {
+    // 形如 127.0.0.1:54328->127.0.0.1:8899
+    const m = /->127\.0\.0\.1:(\d+)/.exec(cols[8] ?? "");
+    if (!m) continue;
+    const port = Number(m[1]);
+    if (ownPorts.has(port)) continue;
+    if (port >= 49152 && !KNOWN_PROXY_PORTS.has(port)) continue;
+    ports.add(port);
+  }
+  return [...ports].sort((a, b) => a - b);
 }
 
 /**
