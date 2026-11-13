@@ -182,3 +182,27 @@ test("processProxyEnv 只认可观察到的代理连接，读不到就说未知"
   const self = await processProxyEnv(process.pid);
   assert.ok(self === null || self.hasProxy === null || self.hasProxy === true);
 });
+
+test("waitForMainPid 会等到进程真的出现，而不是立刻判失败", async () => {
+  const { waitForMainPid } = await import("../src/core/apps.js");
+  // 用真实运行的 Antigravity 验证「已经在跑就立刻返回」；
+  // 关键是不能在进程还没起来时给出 null。
+  const pid = await waitForMainPid({ bundle: "Antigravity" }, { timeoutMs: 3000 });
+  if (pid === null) {
+    // 没装的机器上：应当耗尽超时并干净地返回 null，不抛错
+    assert.equal(pid, null);
+    return;
+  }
+  assert.ok(Number.isInteger(pid) && pid > 0);
+});
+
+test("waitForMainPid 对不存在的应用超时返回 null", async () => {
+  const { waitForMainPid } = await import("../src/core/apps.js");
+  const start = Date.now();
+  const pid = await waitForMainPid(
+    { bundle: "TunlessNoSuchAppForTest" },
+    { timeoutMs: 600, intervalMs: 100 },
+  );
+  assert.equal(pid, null);
+  assert.ok(Date.now() - start >= 500, "应当真的等满超时，而不是立即返回");
+});

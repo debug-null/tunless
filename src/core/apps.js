@@ -669,6 +669,28 @@ export async function mainPid(app) {
 }
 
 /**
+ * 等应用真的起起来，再返回 pid。
+ *
+ * `open -a` 会立刻返回，但那只是「系统收到了启动请求」——
+ * Electron 应用的进程要晚几百毫秒到几秒才出现。启动后立刻查一次进程
+ * 会得到一个必然失败的结论，然后被当成「没能启动」，实际上它正在起。
+ *
+ * 所以这里轮询到超时为止；超时才说明真的没起来。
+ */
+export async function waitForMainPid(app, { timeoutMs = 15000, intervalMs = 300 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  // 先查一次，已经在跑的就不必等
+  const first = await mainPid(app);
+  if (first) return first;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, intervalMs));
+    const pid = await mainPid(app);
+    if (pid) return pid;
+  }
+  return null;
+}
+
+/**
  * 退出应用。
  *
  * Electron 应用（Cursor 就是）经常忽略 AppleScript 的 quit：

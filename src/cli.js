@@ -48,6 +48,8 @@ import {
   codexProxyState,
   networkPid,
   processProxyEnv,
+  mainPid,
+  waitForMainPid,
   APPS,
 } from "./core/apps.js";
 import { VergeAdapter } from "./adapters/verge.js";
@@ -594,6 +596,7 @@ export async function cmdLaunch(args) {
     return 0;
   }
 
+  const beforePid = target ? await mainPid(target) : null;
   const quitResult = await quitApp({ bundle: app.replace(/\.app$/, "") });
   if (!quitResult.quit) {
     say(`  ${warn(`${app} 没能完全退出（pid ${quitResult.pid}），环境变量无法生效`)}`);
@@ -618,14 +621,27 @@ export async function cmdLaunch(args) {
   // 启动成功 ≠ 代理生效。等它真发出请求，再看这条连接去了哪儿。
   const target2 = findApp(app);
   if (target2 && target2.id !== "codex") {
-    for (let i = 0; i < 8; i++) {
-      await new Promise((r) => setTimeout(r, 500));
+    // 先确认它真的起来了。open -a 返回只代表「系统收到请求」。
+    const mainPid = await waitForMainPid(target2);
+    if (!mainPid) {
+      say(`  ${bad(`${app.replace(/\.app$/, "")} 15 秒内没有启动起来`)}`);
+      say(dim("    可以在 Finder 里双击试试；若也起不来，说明是应用本身的问题\n"));
+      return 1;
+    }
+    if (beforePid && mainPid === beforePid) {
+      // 同一个 pid 说明旧实例没退，环境变量还是旧的
+      say(`  ${warn(`进程没有更换（pid ${mainPid}），环境变量可能还是旧的`)}`);
+      say(dim("    请手动 Cmd+Q 完全退出后重试\n"));
+      return 1;
+    }
+    for (let i = 0; i < 10; i++) {
       const netPid = await networkPid(target2);
       const netEnv = await processProxyEnv(netPid);
       if (netEnv?.hasProxy) {
         say(`  ${ok(`代理已生效：${netEnv.httpsProxy}`)} ${dim(`(pid ${netPid})`)}\n`);
         return 0;
       }
+      await new Promise((r) => setTimeout(r, 500));
     }
     say(`  ${dim("应用已启动，但还没观察到它的代理连接")}`);
     say(dim("    应用发出第一个请求后就会走代理；可以用 tunless doctor 复查\n"));

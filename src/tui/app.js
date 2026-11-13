@@ -30,6 +30,7 @@ import {
   appProxyPorts,
   proxyVerdict,
   mainPid,
+  waitForMainPid,
   networkPid,
   processProxyEnv,
 } from "../core/apps.js";
@@ -228,10 +229,13 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       // 不要只相信「命令跑完没报错」。真的去看进程在不在 ——
       // 之前 open 失败被吞掉，界面照样说「已重启」，用户看到的就是
       // 「根本没自动拉起」。
+      //
+      // 但也不能马上看：open -a 返回只是「收到请求」，Electron 进程
+      // 还要几百毫秒到几秒才出现。不等就会把「正在启动」判成「没起来」。
       const target = findApp(app);
-      const alive = target ? await mainPid(target) : null;
+      const alive = target ? await waitForMainPid(target) : null;
       if (!alive) {
-        log(`${app} 没有起来：没找到运行中的进程`, "bad");
+        log(`${app} 在 15 秒内没有启动起来`, "bad");
         await refresh();
         return { ok: false, reason: "not-running" };
       }
