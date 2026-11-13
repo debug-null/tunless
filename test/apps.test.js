@@ -161,3 +161,15 @@ test("proxyVerdict：同时连着旧代理时要标出残留", async () => {
   assert.equal(clean.state, "ok");
   assert.deepEqual(clean.stale, []);
 });
+
+test("processProxyEnv 对不存在的 pid 返回 null 而不是误报有代理", async () => {
+  const { processProxyEnv } = await import("../src/core/apps.js");
+  assert.equal(await processProxyEnv(999999), null);
+  assert.equal(await processProxyEnv(null), null);
+});
+
+test("networkPid 对未运行的应用返回 null", async () => {
+  const { networkPid } = await import("../src/core/apps.js");
+  const pid = await networkPid({ id: "antigravity", bundle: "TunlessNoSuchAppForTest" });
+  assert.equal(pid, null);
+});

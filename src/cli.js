@@ -43,6 +43,9 @@ import {
   readCodexEnv,
   applyEnvText,
   codexProxyState,
+  networkPid,
+  processProxyEnv,
+  APPS,
 } from "./core/apps.js";
 import { VergeAdapter } from "./adapters/verge.js";
 import { GenericAdapter } from "./adapters/generic.js";
@@ -279,6 +282,33 @@ export async function cmdDoctor(args) {
     say(`  ${String(p.pid).padEnd(7)} ${p.comm.slice(0, 52).padEnd(52)} ${badge}`);
     if (p.status === "unsupported") say(dim(`      ${proxyAdvice(p)}`));
   }
+
+  // 「支持代理」不等于「现在真的在用代理」。
+  // Antigravity 登录报 `dial tcp 172.253.117.95:443: i/o timeout` 就是
+  // language_server 没拿到 HTTPS_PROXY、跑去直连谷歌真实 IP 的典型症状。
+  say(head("\n── 进程实际代理 ──"));
+  let anyMissing = false;
+  for (const app of APPS) {
+    if (app.id === "codex") continue;
+    const pid = await networkPid(app);
+    if (!pid) {
+      say(`  ${app.name.padEnd(14)} ${dim("没在运行")}`);
+      continue;
+    }
+    const env = await processProxyEnv(pid);
+    if (env === null) {
+      say(`  ${app.name.padEnd(14)} ${dim(`读不到 pid ${pid} 的环境（权限不足）`)}`);
+      continue;
+    }
+    if (env.hasProxy) {
+      say(`  ${app.name.padEnd(14)} ${ok(env.httpsProxy ?? env.allProxy)}`);
+    } else {
+      anyMissing = true;
+      say(`  ${app.name.padEnd(14)} ${bad("没有代理环境变量 → 会直连外网")}`);
+      say(dim(`      pid ${pid}，用 tunless launch ${app.name} 重新拉起`));
+    }
+  }
+  if (anyMissing) exitCode = 1;
 
   say(head("\n── 转发服务 ──"));
   say(`  ${info("tunless proxy 让工具无需 TUN 也能走代理")}`);
@@ -562,6 +592,24 @@ export async function cmdLaunch(args) {
     say(dim("    请在应用自己的设置里配置代理，或升级到 macOS 13 以上"));
   }
   say(`\n  ${ok(`已使用 tunless 代理启动 ${app.replace(/\.app$/, "")}`)}\n`);
+
+  // 「启动成功」和「代理生效」是两件事。启动完再看一眼联网进程的环境，
+  // 才能回答用户真正关心的问题。
+  const target2 = findApp(app);
+  if (target2 && target2.id !== "codex") {
+    await new Promise((r) => setTimeout(r, 1500));
+    const netPid = await networkPid(target2);
+    const netEnv = await processProxyEnv(netPid);
+    if (netEnv?.hasProxy) {
+      say(`  ${ok(`代理已生效：${netEnv.httpsProxy ?? netEnv.allProxy}`)} ${dim(`(pid ${netPid})`)}\n`);
+    } else if (netEnv === null) {
+      say(`  ${dim("读不到联网进程的环境，无法确认代理是否生效")}\n`);
+    } else {
+      say(`  ${bad("联网进程没有拿到代理变量，它仍会直连外网")}`);
+      say(dim(`    pid ${netPid}。可以试试完全退出应用后重新运行本命令\n`));
+      return 1;
+    }
+  }
   return 0;
 }
 

@@ -166,6 +166,25 @@ export function StepLaunch({ state, width, index, appName, appId, result, execut
               : txt("此刻没有代理连接（可能还没发请求）", { dim: true }),
       ]);
     }
+
+    // 最后一公里：联网子进程到底有没有拿到代理环境变量。
+    // 这一步能解释「明明显示走 8899，登录却 i/o timeout」。
+    if (live?.netPid) {
+      const env = live.env;
+      rows.push([
+        txt("  "),
+        txt(padEnd("进程代理", 12), { dim: true }),
+        env === null
+          ? txt("读不到（权限不足，无法判断）", { dim: true })
+          : env.hasProxy
+            ? txt(`✔ 联网进程已带上 ${env.httpsProxy ?? env.allProxy}`, {
+                color: theme.colors.ok,
+              })
+            : txt("✖ 联网进程没有代理变量，会直连外网（表现为 i/o timeout）", {
+                color: theme.colors.bad,
+              }),
+      ]);
+    }
     rows.push([txt("  ")]);
   }
 

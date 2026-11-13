@@ -24,7 +24,15 @@ import {
 } from "./steps.js";
 import { HelpPanel } from "./help.js";
 import { actionsFor } from "./app-menu.js";
-import { APPS, findApp, appProxyPorts, proxyVerdict, mainPid } from "../core/apps.js";
+import {
+  APPS,
+  findApp,
+  appProxyPorts,
+  proxyVerdict,
+  mainPid,
+  networkPid,
+  processProxyEnv,
+} from "../core/apps.js";
 import { addRule, removeRule, saveRules, loadRules, RULE_KINDS } from "../core/rules.js";
 import { markSeen } from "./first-run.js";
 import { collectState, emptyState } from "./state.js";
@@ -84,7 +92,12 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     }
     try {
       const conn = await appProxyPorts(target);
-      const next = { ...conn, verdict: proxyVerdict(conn) };
+      // 光有连接还不够：得看联网子进程的环境里到底有没有代理。
+      // 没有的话它会去直连真实 IP，报 `dial tcp … i/o timeout`，
+      // 而界面还显示「已走 8899」，完全是误导。
+      const netPid = await networkPid(target);
+      const env = await processProxyEnv(netPid);
+      const next = { ...conn, verdict: proxyVerdict(conn), netPid, env };
       setLive(next);
       return next;
     } catch {

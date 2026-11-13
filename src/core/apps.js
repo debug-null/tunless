@@ -743,3 +743,67 @@ export async function openApp(app, env) {
   await exec("open", ["-a", bundle], { timeout: 20000 });
   return { launched: true, envApplied: false };
 }
+
+/**
+ * 读某个进程里实际生效的代理环境变量。
+ *
+ * 这是「配置写了 ≠ 生效了」最后一公里的证据：Antigravity 的 language_server
+ * 如果没拿到 HTTPS_PROXY，它就会去直连 oauth2.googleapis.com 的真实 IP，
+ * 报 `dial tcp 172.253.117.95:443: i/o timeout` —— 和代理有没有开完全无关。
+ *
+ * macOS 上 `ps -E` 能带出环境，但对别的用户的进程无效；拿不到时返回 null，
+ * 由调用方说「未知」而不是猜。
+ */
+export async function processProxyEnv(pid) {
+  if (!pid) return null;
+  try {
+    const { stdout } = await exec("ps", ["-E", "-p", String(pid)], {
+      timeout: 8000,
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    const env = {};
+    for (const token of stdout.split(/\s+/)) {
+      const m = /^(HTTPS?_PROXY|ALL_PROXY|NO_PROXY|https?_proxy|all_proxy|no_proxy)=(.*)$/.exec(token);
+      if (m) env[m[1]] = m[2];
+    }
+    const pick = (k) => env[k] ?? env[k.toLowerCase()] ?? null;
+    const https = pick("HTTPS_PROXY");
+    const all = pick("ALL_PROXY");
+    return {
+      pid,
+      httpsProxy: https,
+      allProxy: all,
+      noProxy: pick("NO_PROXY"),
+      // 有任何一个能用的就直接判定，不要求两个都设
+      hasProxy: Boolean(https || all),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 应用里真正负责联网的子进程。
+ * Antigravity 是 language_server（Go），Cursor 是 Plugin Helper。
+ * 主进程只是壳子，查它的环境没有意义。
+ */
+export async function networkPid(app) {
+  if (!app) return null;
+  if (app.id === "codex") return (await appProxyPorts(app)).pids[0] ?? null;
+  try {
+    const { stdout } = await exec("ps", ["-Ao", "pid=,command="], {
+      timeout: 8000,
+      maxBuffer: 32 * 1024 * 1024,
+    });
+    const patterns =
+      app.id === "antigravity"
+        ? [`/${app.bundle}.app/Contents/Resources/bin/language_server`]
+        : [`/${app.bundle}.app/Contents/Frameworks/${app.bundle} Helper (Plugin).app/`];
+    const line = stdout.split("\n").find((l) => patterns.some((p) => l.includes(p)));
+    if (!line) return null;
+    const pid = Number(line.trim().split(/\s+/)[0]);
+    return Number.isFinite(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
