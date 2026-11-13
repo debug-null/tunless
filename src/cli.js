@@ -77,6 +77,24 @@ const info = (t) => paint(C.cyan, `• ${t}`);
 const head = (t) => paint(C.bold, t);
 const dim = (t) => paint(C.dim, t);
 
+// 这些是纯开关，不接受后面的值。
+// 否则 `launch --write-settings Antigravity` 会把 Antigravity 当成
+// --write-settings 的值吃掉，应用名就丢了。
+const BOOLEAN_FLAGS = new Set([
+  "yes",
+  "y",
+  "h",
+  "help",
+  "no-chrome",
+  "print-env",
+  "no-scan",
+  "no-restart",
+  "write-settings",
+  "keyword",
+  "cidr",
+  "version",
+]);
+
 export function parseArgs(argv) {
   const args = { _: [], flags: {} };
   for (let i = 0; i < argv.length; i++) {
@@ -86,12 +104,13 @@ export function parseArgs(argv) {
       if (eq !== -1) {
         args.flags[a.slice(2, eq)] = a.slice(eq + 1);
       } else {
+        const name = a.slice(2);
         const next = argv[i + 1];
-        if (next && !next.startsWith("--")) {
-          args.flags[a.slice(2)] = next;
+        if (next && !next.startsWith("--") && !BOOLEAN_FLAGS.has(name)) {
+          args.flags[name] = next;
           i += 1;
         } else {
-          args.flags[a.slice(2)] = true;
+          args.flags[name] = true;
         }
       }
     } else {
@@ -471,17 +490,12 @@ export async function cmdLaunch(args) {
   say(`  ${info(`代理：http://127.0.0.1:${httpPort}${socksPort ? ` / socks5://127.0.0.1:${socksPort}` : ""}`)}`);
   say(`  ${dim(`NO_PROXY：${noProxyList}`)}`);
 
-  // --print-env 只打印变量，不改配置也不启动应用
-  if (args.flags["print-env"] === true) {
-    for (const [key, value] of Object.entries(env)) say(dim(`    export ${key}=${value}`));
-    say();
-    return 0;
-  }
-
   // VS Code 系应用（Antigravity / Cursor）的 Chromium 部分读 http.proxy，
-  // 光给环境变量只通一半，所以还要写 settings.json。
+  // 光给环境变量只通一半。但要不要改用户的配置文件由用户决定：
+  // 默认只注入环境变量，加 --write-settings 才写 settings.json。
   const target = findApp(app);
-  if (target?.settingsPath) {
+  const wantSettings = args.flags["write-settings"] === true;
+  if (wantSettings && target?.settingsPath) {
     const result = await configureCursor({
       proxyUrl: `http://127.0.0.1:${httpPort}`,
       yes: true,
@@ -489,6 +503,15 @@ export async function cmdLaunch(args) {
       app: target,
     });
     if (!result.ok) return 1;
+  } else if (target?.settingsPath) {
+    say(dim(`  ${target.name} 的配置文件未改动（需要的话加 --write-settings）`));
+  }
+
+  // --print-env 只打印变量，不启动应用
+  if (args.flags["print-env"] === true) {
+    for (const [key, value] of Object.entries(env)) say(dim(`    export ${key}=${value}`));
+    say();
+    return 0;
   }
 
   const quitResult = await quitApp({ bundle: app.replace(/\.app$/, "") });
@@ -872,6 +895,7 @@ ${head("选项")}
   --print-env           只打印环境变量后退出
   --no-scan             仅使用客户端配置，不做实时扫描
   --app <名称>          要启动的应用（默认 Antigravity）
+  --write-settings      同时写入应用的代理配置（默认只注入环境变量，不改文件）
   --yes, -y             跳过确认提示
   --help, -h            显示帮助
 
@@ -882,6 +906,7 @@ ${head("示例")}
   tunless fix --yes
   tunless proxy
   tunless launch Antigravity
+  tunless launch Cursor --write-settings
   tunless cursor
   tunless rules add '+.17usoft.com'
   tunless rules add 10.0.0.0/8

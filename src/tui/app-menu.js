@@ -1,26 +1,57 @@
-// 按 l 弹出的「选哪个应用」菜单。
+// 按 l 弹出的菜单。
 //
-// 之前是「按一次换一个」地轮流启动，用户根本不知道当前轮到谁。
-// 改成显式选择：上下移动、回车确认、Esc 取消。
+// 两级选择：
+//   第一级：选哪个应用
+//   第二级：选怎么处理（只注入环境变量 / 同时写配置文件 / 只写配置不启动）
+//
+// 之前是「按一次换一个」地轮流启动，用户既不知道当前轮到谁，
+// 也不知道工具会替自己改哪些文件。现在两件事都由用户明确选择。
 
 import { Box, Text } from "ink";
 import { h, Card, txt, useTheme } from "./ui.js";
 import { APPS } from "../core/apps.js";
 
-export function AppMenu({ width, index = 0 }) {
-  const theme = useTheme();
-  const cardWidth = Math.min(width, 72);
+/** 每个应用可选的处理方式 */
+export const ACTIONS = [
+  {
+    id: "env",
+    label: "只注入代理环境变量后启动",
+    detail: "不改任何配置文件，随时可以撤销",
+  },
+  {
+    id: "env+settings",
+    label: "注入环境变量 + 写入代理配置后启动",
+    detail: "会改 settings.json（自动备份），让应用自身的网络请求也走代理",
+  },
+  {
+    id: "settings",
+    label: "只写入代理配置，不启动",
+    detail: "你自己决定什么时候重启应用",
+  },
+];
 
-  const rows = APPS.map((app, i) => {
-    const selected = i === index;
-    return [
-      txt("  ", { dim: true }),
-      txt(selected ? "› " : "  ", { color: selected ? theme.colors.accent : undefined }),
-      txt(app.name, { bold: selected, color: selected ? theme.colors.accent : undefined }),
-      txt("    "),
-      txt(app.description, { dim: true }),
-    ];
-  });
+export function AppMenu({ width, index = 0, stage = "app", app = null, actionIndex = 0 }) {
+  const theme = useTheme();
+  const cardWidth = Math.min(width, 76);
+
+  const row = (selected, title, detail) => [
+    txt("  ", { dim: true }),
+    txt(selected ? "› " : "  ", { color: selected ? theme.colors.accent : undefined }),
+    txt(title, { bold: selected, color: selected ? theme.colors.accent : undefined }),
+    txt("    "),
+    txt(detail, { dim: true }),
+  ];
+
+  let rows;
+  let title;
+
+  if (stage === "app") {
+    title = "要带代理启动哪个应用？";
+    rows = APPS.map((a, i) => row(i === index, a.name, a.description));
+  } else {
+    title = `${app?.name ?? ""} 要怎么处理？`;
+    rows = ACTIONS.map((a, i) => row(i === actionIndex, a.label, a.detail));
+  }
 
   rows.push(
     [txt("  "), txt("  "), txt("  "), txt("")],
@@ -28,13 +59,15 @@ export function AppMenu({ width, index = 0 }) {
       txt("  "),
       txt("  "),
       txt("  "),
-      txt("回车启动 · ↑↓ 选择 · Esc 取消", { dim: true }),
+      txt(stage === "app" ? "回车继续 · ↑↓ 选择 · Esc 取消" : "回车确认 · ↑↓ 选择 · Esc 返回", {
+        dim: true,
+      }),
     ],
   );
 
   return h(
     Box,
     { flexDirection: "column" },
-    h(Card, { title: "要带代理启动哪个应用？", width: cardWidth, rows }),
+    h(Card, { title, width: cardWidth, rows }),
   );
 }

@@ -13,7 +13,7 @@ import { queryTerminalColorScheme, themeFromEnv } from "./terminal-theme.js";
 import { PANELS, OverviewPanel } from "./panels.js";
 import { HelpPanel } from "./help.js";
 import { RulesPanel, MorePanel } from "./rules-panel.js";
-import { AppMenu } from "./app-menu.js";
+import { AppMenu, ACTIONS } from "./app-menu.js";
 import { APPS } from "../core/apps.js";
 import { addRule, removeRule, saveRules, loadRules, RULE_KINDS } from "../core/rules.js";
 import { isFirstRun, markSeen } from "./first-run.js";
@@ -48,9 +48,12 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const [editing, setEditing] = useState(null);
   const [draft, setDraft] = useState("");
   const [ruleIndex, setRuleIndex] = useState(0);
-  // 按 l 弹出的应用选择菜单
+  // 按 l 弹出的两级菜单：先选应用，再选怎么处理
   const [appMenu, setAppMenu] = useState(false);
+  const [menuStage, setMenuStage] = useState("app");
   const [appMenuIndex, setAppMenuIndex] = useState(0);
+  const [actionIndex, setActionIndex] = useState(0);
+  const [pickedApp, setPickedApp] = useState(null);
 
   const log = useCallback((text, kind = "info") => {
     const time = new Date().toLocaleTimeString("zh-CN", { hour12: false });
@@ -144,32 +147,41 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     await refresh();
   }, [state.sidecar.running, state.sidecar.installed, log, refresh]);
 
-  const launchApp = useCallback(async (app) => {
-    log(`正在以 tunless 代理重启 ${app}…`, "info");
-    const { cmdLaunch, setQuiet } = await import("../cli.js");
-    setQuiet(true);
-    await cmdLaunch(
-      {
-        _: ["launch"],
-        flags: {
-          app,
-          "internal-dns": internalDns,
-          "no-chrome": includeChrome ? false : true,
+  /**
+   * 带代理启动应用。
+   * writeSettings 决定要不要改应用自己的配置文件 —— 由用户在菜单里选，
+   * 工具不擅自决定。
+   */
+  const launchApp = useCallback(
+    async (app, { writeSettings = false } = {}) => {
+      log(`正在以 tunless 代理重启 ${app}…`, "info");
+      const { cmdLaunch, setQuiet } = await import("../cli.js");
+      setQuiet(true);
+      await cmdLaunch(
+        {
+          _: ["launch"],
+          flags: {
+            app,
+            "internal-dns": internalDns,
+            "no-chrome": includeChrome ? false : true,
+            "write-settings": writeSettings,
+          },
         },
-      },
-      { quiet: true },
-    );
-    log(`${app} 已重启`, "ok");
-    setHint(
-      app === "Cursor"
-        ? "Cursor 已带代理启动，发一条消息试试模型能不能回"
-        : `${app} 已带代理启动`,
-    );
-    await refresh();
-  }, [internalDns, includeChrome, log, refresh]);
+        { quiet: true },
+      );
+      log(`${app} 已重启`, "ok");
+      setHint(
+        app === "Cursor"
+          ? "Cursor 已带代理启动，发一条消息试试模型能不能回"
+          : `${app} 已带代理启动`,
+      );
+      await refresh();
+    },
+    [internalDns, includeChrome, log, refresh],
+  );
 
   /**
-   * 按 l 打开应用选择菜单。
+   * 按 l 打开应用菜单。
    * 之前是「按一次换一个」地轮流，用户不知道当前轮到谁；
    * 改成显式选择后，每次都知道自己要启动的是哪个。
    */
@@ -177,49 +189,53 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     setAppMenu(true);
   }, []);
 
-  const launchFromMenu = useCallback(
-    async (app) => {
-      setAppMenu(false);
-      await launchApp(app);
+  /** 菜单里选完「应用 + 处理方式」后执行 */
+  const applyAppAction = useCallback(
+    async (app, actionId) => {
+      if (!app) return;
+      if (actionId === "env") {
+        await launchApp(app.name, { writeSettings: false });
+        return;
+      }
+      if (actionId === "env+settings") {
+        await launchApp(app.name, { writeSettings: true });
+        return;
+      }
+      if (actionId === "settings") {
+        // 只写配置，不动应用
+        log(`正在写入 ${app.name} 的代理配置…`, "info");
+        const { configureCursor, setQuiet } = await import("../cli.js");
+        setQuiet(true);
+        const result = await configureCursor({
+          proxyUrl: "http://127.0.0.1:8899",
+          yes: true,
+          quiet: true,
+          app,
+        });
+        if (!result.ok) {
+          log(`${app.name} 配置写入失败`, "bad");
+          setHint(`写入失败：${app.name} 的配置文件可能还没生成，先打开一次应用`);
+          return;
+        }
+        log(`${app.name} 代理配置已写入`, "ok");
+        setHint(`${app.name} 配置已写入，重启应用后生效`);
+        await refresh();
+      }
     },
-    [launchApp],
+    [launchApp, log, refresh],
   );
 
-  /** Cursor 专用：改 settings.json + 关 HTTP/2 + 带代理重启 */
+  /**
+   * 按 L：直接跳到 Cursor 的「怎么处理」那一步。
+   * 和按 l 一样，写不写配置文件由用户自己选，不替他决定。
+   */
   const runCursor = useCallback(async () => {
-    log("正在配置 Cursor 代理…", "info");
-    const { configureCursor, setQuiet } = await import("../cli.js");
-    setQuiet(true);
-    const { quitApp, openApp, findApp } = await import("../core/apps.js");
-    const result = await configureCursor({
-      proxyUrl: "http://127.0.0.1:8899",
-      yes: true,
-      quiet: true,
-    });
-    if (!result.ok) {
-      log("Cursor 配置失败", "bad");
-      setHint("Cursor 配置失败：先打开一次 Cursor 生成配置");
-      return;
-    }
-    const app = findApp("cursor");
-    const quitResult = await quitApp(app);
-    if (!quitResult.quit) {
-      log(`Cursor 没能退出（pid ${quitResult.pid}）`, "bad");
-      setHint("Cursor 没能退出，请手动 Cmd+Q 后再按 L（配置已写好）");
-      return;
-    }
-    if (quitResult.escalated) log("Cursor 忽略正常退出，已强制关闭", "warn");
-    await new Promise((r) => setTimeout(r, 2000));
-    await openApp(app, {
-      HTTPS_PROXY: "http://127.0.0.1:8899",
-      HTTP_PROXY: "http://127.0.0.1:8899",
-      https_proxy: "http://127.0.0.1:8899",
-      http_proxy: "http://127.0.0.1:8899",
-    });
-    log("Cursor 已配置并带着代理重启", "ok");
-    setHint("Cursor 已带代理重启，发一条消息试试模型能不能回");
-    await refresh();
-  }, [log, refresh]);
+    const { findApp } = await import("../core/apps.js");
+    setPickedApp(findApp("cursor"));
+    setActionIndex(0);
+    setMenuStage("action");
+    setAppMenu(true);
+  }, []);
 
   const runAction = useCallback(
     async (name) => {
@@ -328,26 +344,43 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   }, [flatRules, ruleIndex, log]);
 
   useInput((input, key) => {
-    // 应用选择菜单：上下移动、回车确认、Esc 取消
+    // 应用菜单：先选应用，再选怎么处理。
+    // 写不写配置文件由用户自己决定，工具不替他改。
     if (appMenu) {
+      const count = menuStage === "app" ? APPS.length : ACTIONS.length;
       if (key.escape) {
+        if (menuStage === "action") {
+          setMenuStage("app");
+          return;
+        }
         setAppMenu(false);
         setAppMenuIndex(0);
         return;
       }
       if (key.upArrow) {
-        setAppMenuIndex((i) => Math.max(0, i - 1));
+        if (menuStage === "app") setAppMenuIndex((i) => Math.max(0, i - 1));
+        else setActionIndex((i) => Math.max(0, i - 1));
         return;
       }
       if (key.downArrow) {
-        setAppMenuIndex((i) => Math.min(APPS.length - 1, i + 1));
+        if (menuStage === "app") setAppMenuIndex((i) => Math.min(APPS.length - 1, i + 1));
+        else setActionIndex((i) => Math.min(ACTIONS.length - 1, i + 1));
         return;
       }
       if (key.return) {
-        const app = APPS[appMenuIndex];
+        if (menuStage === "app") {
+          setPickedApp(APPS[appMenuIndex]);
+          setActionIndex(0);
+          setMenuStage("action");
+          return;
+        }
+        const app = pickedApp;
+        const action = ACTIONS[actionIndex];
         setAppMenu(false);
+        setMenuStage("app");
         setAppMenuIndex(0);
-        launchFromMenu(app.name);
+        setPickedApp(null);
+        applyAppAction(app, action.id);
         return;
       }
       return;
@@ -529,7 +562,13 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
 
   const helpText = panel === "help" ? "← 回到总览 · r 刷新 · q 退出" : DEFAULT_HINT;
   const help = appMenu
-    ? h(Text, { dimColor: true }, "回车启动 · ↑↓ 选择 · Esc 取消")
+    ? h(
+        Text,
+        { dimColor: true },
+        menuStage === "app"
+          ? "回车继续 · ↑↓ 选择 · Esc 取消"
+          : "回车确认 · ↑↓ 选择 · Esc 返回",
+      )
     : searching
       ? h(Text, { color: theme.colors.info }, `搜索：${query}▏（回车确认，Esc 取消）`)
       : h(Text, { dimColor: true }, hint || helpText);
@@ -549,7 +588,13 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       Box,
       { flexDirection: "column", flexGrow: 1, overflow: "hidden" },
       appMenu
-        ? h(AppMenu, { width, index: appMenuIndex })
+        ? h(AppMenu, {
+            width,
+            index: appMenuIndex,
+            stage: menuStage,
+            app: pickedApp,
+            actionIndex,
+          })
         : h(PanelComponent, panelProps),
     ),
     h(Box, { flexDirection: "column" }, help, h(Text, { dimColor: true }, " ")),
