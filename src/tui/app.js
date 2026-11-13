@@ -206,7 +206,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const launchApp = useCallback(
     async (app, { writeSettings = false } = {}) => {
       log(`正在以 tunless 代理重启 ${app}…`, "info");
-      const { cmdLaunch, setQuiet } = await import("../cli.js");
+      const { cmdLaunch, setQuiet, takeCapturedOutput } = await import("../cli.js");
       setQuiet(true);
       const code = await cmdLaunch(
         {
@@ -220,10 +220,36 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         },
         { quiet: true },
       );
+      // 静默模式下 CLI 的输出被攒着。失败时这是唯一能说明原因的东西，
+      // 必须取出来展示，否则界面上只剩一句「没能启动」。
+      const detail = takeCapturedOutput();
+      // 界面上的状态行只留一两行，真正的原因必须落到文件里 ——
+      // 否则用户只能看到「没能启动」，我们永远查不出为什么。
+      try {
+        const fs = await import("node:fs");
+        const path = await import("node:path");
+        const os = await import("node:os");
+        const dir = path.join(os.homedir(), ".tunless");
+        fs.mkdirSync(dir, { recursive: true });
+        fs.appendFileSync(
+          path.join(dir, "tui.log"),
+          `\n[${new Date().toISOString()}] launch ${app} exit=${code}\n${detail}\n`,
+          "utf8",
+        );
+      } catch {
+        // 记日志失败不该影响主流程
+      }
       if (code !== 0) {
-        log(`${app} 启动失败（退出码 ${code}）`, "bad");
+        const reason =
+          detail
+            .split("\n")
+            .map((line) => line.replace(/^\s*[•✔✖▲]\s*/, "").trim())
+            .filter(Boolean)
+            .slice(-3)
+            .join("；") || `退出码 ${code}`;
+        log(`${app} 启动失败：${reason}`, "bad");
         await refresh();
-        return { ok: false, code };
+        return { ok: false, code, detail };
       }
 
       // 不要只相信「命令跑完没报错」。真的去看进程在不在 ——
@@ -254,10 +280,19 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       if (actionId === "env" || actionId === "env+settings") {
         const launched = await launchApp(app.name, { writeSettings: actionId === "env+settings" });
         if (!launched?.ok) {
+          // 把 CLI 说的原因原样带出来，别让用户只看到一句「没能启动」。
+          const detail = launched?.detail
+            ?.split("\n")
+            .map((line) => line.replace(/^\s*[•✔✖▲]\s*/, "").trim())
+            .filter(Boolean)
+            .slice(-2)
+            .join("；");
           setHint(
             app.id === "codex" || app.name === "Codex"
               ? "写入 .env 失败，检查一下文件权限"
-              : `${app.name} 没能启动。手动打开它，或用 tunless launch ${app.name} 看详细报错`,
+              : detail
+                ? `${app.name} 没能启动：${detail}`
+                : `${app.name} 没能启动。用 tunless launch ${app.name} 看详细报错`,
           );
           // 返回 null 表示「这一步没成功」：界面不该打勾，用户应该能重试。
           return null;

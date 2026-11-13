@@ -60,12 +60,26 @@ const exec = promisify(execFile);
 
 // TUI 调用时静默输出，避免刷屏破坏界面。
 let quiet = false;
+// 静默模式下把输出攒起来，调用方想知道「为什么失败」时能拿到原文。
+let captured = null;
 export function setQuiet(value) {
   quiet = Boolean(value);
+  captured = quiet ? [] : null;
+}
+
+/** 取走静默模式下累积的输出（并清空）。 */
+export function takeCapturedOutput() {
+  const text = captured ? captured.join("\n") : "";
+  if (captured) captured.length = 0;
+  return text;
 }
 function say(text) {
   // 无参调用是想打印一个空行，而不是把 undefined 打出去
-  if (!quiet) console.log(text ?? "");
+  if (quiet) {
+    captured?.push(String(text ?? ""));
+    return;
+  }
+  console.log(text ?? "");
 }
 
 const C = {
