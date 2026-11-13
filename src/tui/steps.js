@@ -70,12 +70,19 @@ export function StepApps({ state, width, index }) {
         : app.id === "codex"
           ? "命令行工具"
           : "没在运行";
+      // 最要紧的一条信息：它现在是不是已经走着 tunless 的代理。
+      const proxied =
+        app.proxied === "ok"
+          ? " ✔ 已走代理"
+          : app.proxied === "stale"
+            ? " ⚠ 还连着旧代理"
+            : "";
       rows.push(
         option(
           theme,
           i === index,
           app.name,
-          [app.version ?? "", state].filter(Boolean).join(" · "),
+          [app.version ?? "", state].filter(Boolean).join(" · ") + proxied,
           nameWidth,
         ),
       );
@@ -412,8 +419,16 @@ export function StepDomains({ state, width }) {
   const rows = [];
 
   if (!domains.length) {
-    rows.push([txt("  "), txt("没扫到内网域名", { dim: true })]);
-    rows.push([txt("  "), txt("多半是没给终端完全磁盘访问权限，也可以按 a 手写一条", { dim: true })]);
+    if (state.dnsAlive === false) {
+      rows.push([
+        txt("  "),
+        txt(`内网 DNS ${state.internalDns ?? ""} 不可达，本次没扫`, { color: theme.colors.warn }),
+      ]);
+      rows.push([txt("  "), txt("不在公司网络时这是正常的；也可以按 a 手写一条", { dim: true })]);
+    } else {
+      rows.push([txt("  "), txt("没扫到内网域名", { dim: true })]);
+      rows.push([txt("  "), txt("多半是没给终端完全磁盘访问权限，也可以按 a 手写一条", { dim: true })]);
+    }
   } else {
     const nameWidth = Math.max(...domains.map((d) => d.name.length)) + 2;
     for (const domain of domains.slice(0, 10)) {
@@ -428,7 +443,28 @@ export function StepDomains({ state, width }) {
       rows.push([txt("  "), txt(`…… 还有 ${domains.length - 10} 个`, { dim: true })]);
     }
     rows.push([txt("  ")]);
-    rows.push([txt("  "), txt("这些域名走直连，不进代理", { dim: true })]);
+
+    // 分清「正在生效的」和「重启后才生效的」。运行中的服务加载的是它
+    // 启动那一刻算好的后缀集，刚扫出来的域名不会自己进去。
+    const active = state.sidecar?.activeSuffixes ?? [];
+    const pending = state.sidecar?.pendingSuffixes ?? [];
+    if (state.sidecar?.running) {
+      rows.push([
+        txt("  "),
+        txt(`转发服务正在分流 ${active.length} 个后缀`, { color: theme.colors.ok }),
+      ]);
+      if (pending.length) {
+        rows.push([
+          txt("  "),
+          txt(
+            `还有 ${pending.length} 个后缀要重启服务才生效（按 S 停，再按 S 启）`,
+            { color: theme.colors.warn },
+          ),
+        ]);
+      }
+    } else {
+      rows.push([txt("  "), txt("转发服务没在跑，启动后这些域名会走直连", { dim: true })]);
+    }
   }
 
   const manual = Object.values(state.rules ?? {}).reduce(
@@ -436,7 +472,7 @@ export function StepDomains({ state, width }) {
     0,
   );
   if (manual) {
-    rows.push([txt("  "), txt(`你手写的规则 ${manual} 条也生效`, { dim: true })]);
+    rows.push([txt("  "), txt(`你手写的规则 ${manual} 条也会生效`, { dim: true })]);
   }
 
   return h(StepFrame, {
@@ -477,7 +513,18 @@ export function StepDone({ state, width, appName, reachability }) {
     [
       txt("  "),
       txt(padEnd("内网域名", 10), { dim: true }),
-      txt(`${state.internalDomains?.length ?? 0} 个已分流`, { color: theme.colors.ok }),
+      state.sidecar?.running
+        ? txt(
+            `${(state.sidecar.activeSuffixes ?? []).length} 个正在分流` +
+              ((state.sidecar.pendingSuffixes ?? []).length
+                ? ` · ${state.sidecar.pendingSuffixes.length} 个待重启生效`
+                : ""),
+            { color: (state.sidecar.pendingSuffixes ?? []).length ? theme.colors.warn : theme.colors.ok },
+          )
+        : txt(
+            `${state.suffixes?.length ?? state.internalDomains?.length ?? 0} 个待分流（服务未启动）`,
+            { dim: true },
+          ),
     ],
     [
       txt("  "),

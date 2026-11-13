@@ -79,7 +79,13 @@ export function OverviewPanel({ state, width, appName = null, reachability = nul
       ? installed
           .map(
             (a) =>
-              `${a.name}${a.version ? ` ${a.version}` : ""}${a.running ? "（在跑）" : ""}`,
+              `${a.name}${a.version ? ` ${a.version}` : ""}${
+                a.proxied === "ok"
+                  ? "（已走代理）"
+                  : a.running
+                    ? "（在跑）"
+                    : ""
+              }`,
           )
           .join(" · ")
       : "没检测到支持的工具";
@@ -142,26 +148,26 @@ export function OverviewPanel({ state, width, appName = null, reachability = nul
     ),
   );
 
-  // ⑤ 内网域名
+  // ⑤ 内网域名 —— 分清「正在生效」和「重启才生效」，
+  // 别把刚扫出来还没生效的域名说成已分流。
+  const active = side.activeSuffixes ?? [];
+  const pending = side.pendingSuffixes ?? [];
   const domainStatus = state.loading
     ? statusCell("muted", "扫描中")
     : txt(padEnd(`${state.internalDomains.length} 个`, STATUS_WIDTH), {
         bold: true,
         color: state.fakeCount > 0 ? theme.colors.warn : theme.colors.text,
       });
-  const needFix = state.fakeCount > 0;
-  steps.push(
-    stepRow(
-      4,
-      "内网域名",
-      domainStatus,
-      state.loading
-        ? ""
-        : needFix
-          ? `${state.fakeCount} 个还拿到假 IP，按 5 修复`
-          : "解析正常，按 5 查看",
-    ),
-  );
+  const domainDetail = state.loading
+    ? ""
+    : state.dnsAlive === false
+      ? `内网 DNS 不可达没扫 · 按 5 手写`
+      : state.fakeCount > 0
+        ? `${state.fakeCount} 个还拿到假 IP，按 5 修复`
+        : side.running && pending.length
+          ? `${active.length} 个生效中 · ${pending.length} 个待重启生效`
+          : "解析正常，按 5 查看";
+  steps.push(stepRow(4, "内网域名", domainStatus, domainDetail));
 
   const stepRows = [
     ...steps,
@@ -213,10 +219,15 @@ export function OverviewPanel({ state, width, appName = null, reachability = nul
   const sys = state.systemProxy;
   envSegments.push(txt(" · 系统代理 ", { dim: true }));
   envSegments.push(
-    sys && sys.httpEnabled && sys.httpsEnabled
-      ? badge("ok", `${sys.host}:${sys.port}`)
+    sys && (sys.httpEnabled || sys.httpsEnabled || sys.socksEnabled)
+      ? badge("ok", `${sys.host ?? sys.socksHost}:${sys.port ?? sys.socksPort}`)
       : badge("warn", "没开"),
   );
+  // 内网 DNS 不通时直接标出来 —— 之前用户要到第 5 步才发现没扫。
+  if (state.dnsAlive === false) {
+    envSegments.push(txt(" · 内网DNS ", { dim: true }));
+    envSegments.push(badge("warn", "不通"));
+  }
 
   const extraRows = [];
   const manualCount = Object.values(state.rules ?? {}).reduce(

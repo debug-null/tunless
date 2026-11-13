@@ -41,3 +41,44 @@ export function dataDir() {
 export function legacyDataDir() {
   return path.join(home(), `.${LEGACY_NAME}`);
 }
+
+// ---- 正在运行的转发服务的「真实状态」----
+//
+// TUI 第 5 步展示的分流域名、doctor 说的上游，都该以运行中的服务
+// 实际加载的配置为准，而不是「刚算出来、还没生效」的那套。proxy
+// 启动时把这份快照写下来，界面才能区分「生效中」和「待重启生效」。
+
+export function runtimeFile() {
+  return path.join(dataDir(), "runtime.json");
+}
+
+export function writeRuntime(info) {
+  try {
+    fs.mkdirSync(dataDir(), { recursive: true });
+    fs.writeFileSync(
+      runtimeFile(),
+      `${JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), ...info }, null, 2)}\n`,
+      "utf8",
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function readRuntime() {
+  try {
+    return JSON.parse(fs.readFileSync(runtimeFile(), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+export function clearRuntime() {
+  try {
+    fs.unlinkSync(runtimeFile());
+    return true;
+  } catch {
+    return false;
+  }
+}

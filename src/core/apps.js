@@ -105,10 +105,14 @@ export function cursorSettingsPath() {
   );
 }
 
-/** 应用版本号，从 /Applications/<Name>.app 的 Info.plist 读 */
+/** 应用版本号，从 <dir>/<Name>.app 的 Info.plist 读；/Applications 和 ~/Applications 都查 */
 export function appVersion(bundle = "Cursor") {
-  const plist = `/Applications/${bundle}.app/Contents/Info.plist`;
-  if (!fs.existsSync(plist)) return null;
+  const candidates = [
+    `/Applications/${bundle}.app/Contents/Info.plist`,
+    `${os.homedir()}/Applications/${bundle}.app/Contents/Info.plist`,
+  ];
+  const plist = candidates.find((p) => fs.existsSync(p));
+  if (!plist) return null;
   try {
     const buf = fs.readFileSync(plist, "utf8");
     const m = /<key>CFBundleShortVersionString<\/key>\s*<string>([^<]+)<\/string>/.exec(buf);
@@ -226,15 +230,17 @@ export async function codexDesktopRunning() {
  *    所以要把整个进程树都扫一遍，不能只看主进程。
  */
 export async function appProxyPorts(app) {
-  if (!app) return { pids: [], ports: [] };
+  if (!app) return { pids: [], ports: [], byPid: new Map() };
 
   // 注意：不能只匹配主进程。真正联网的往往是子进程 ——
-  // Antigravity 的 language_server、Cursor 的 Plugin Helper 都在 .app 目录下，
+  // Antigravity 的 language_server、Cursor 的 helper 都在 .app 目录下，
   // 只盯 MainOS/<Bundle> 会永远得到「没有代理连接」这个假结论。
+  // 匹配用路径后缀而不是 /Applications 前缀 —— 装在 ~/Applications 的
+  // 应用以前会被整棵树漏掉。
   const targets =
     app.id === "codex"
       ? ["codex-cli/CodexCLI.app/Contents/MacOS/codex"]
-      : [`/Applications/${app.bundle}.app/`];
+      : [`/${app.bundle}.app/`];
 
   try {
     const { stdout } = await exec("ps", ["-Ao", "pid=,command="], {
@@ -247,9 +253,10 @@ export async function appProxyPorts(app) {
       .map((line) => Number(line.trim().split(/\s+/)[0]))
       .filter((n) => Number.isFinite(n) && n > 0);
 
-    return { pids, ports: await proxyPortsForPids(pids) };
+    const { ports, byPid } = await proxyPortsForPids(pids);
+    return { pids, ports, byPid };
   } catch {
-    return { pids: [], ports: [] };
+    return { pids: [], ports: [], byPid: new Map() };
   }
 }
 
@@ -258,20 +265,24 @@ export async function appProxyPorts(app) {
  * 逐个 pid 调 lsof 在 Electron 应用上要跑十几次，慢到界面会卡住。
  */
 export async function proxyPortsForPids(pids) {
-  if (!pids?.length) return [];
+  if (!pids?.length) return { ports: [], byPid: new Map() };
   try {
     const { stdout } = await exec("lsof", ["-nP", "-iTCP"], {
       timeout: 15000,
       maxBuffer: 32 * 1024 * 1024,
     });
-    return parseProxyPorts(stdout, pids);
+    return parseProxyConnections(stdout, pids);
   } catch {
-    return [];
+    return { ports: [], byPid: new Map() };
   }
 }
 
-/** 常见本地代理端口：Clash 系列、tunless、通用 SOCKS/HTTP 端口。 */
-const KNOWN_PROXY_PORTS = new Set([7897, 7890, 7891, 8899, 8898, 1080, 1087, 10808, 8080, 8888]);
+/**
+ * 常见本地代理端口：Clash 系列、tunless、SOCKS 标准端口。
+ * 故意不含 8080/8888 —— 那是本地 web 开发的常用端口，
+ * 把它们当代理端口会让「起了一个 dev server」被报成「在走代理」。
+ */
+const KNOWN_PROXY_PORTS = new Set([7897, 7890, 7891, 8899, 8898, 1080, 1087, 10808]);
 
 /**
  * 代理程序的名字特征。用来回答「这个端口是谁在监听」——
@@ -289,8 +300,17 @@ const PROXY_LISTENER = /^(node|mihomo|clash|clash-verge|verge-mihomo|sing-box|v2
  * 只看这些会把 `unknown` 说成「没走代理」，或者干脆报一堆假端口。
  */
 export function parseProxyPorts(lsofOutput, pids) {
+  return parseProxyConnections(lsofOutput, pids).ports;
+}
+
+/**
+ * 同 parseProxyPorts，但额外返回 byPid：每个 pid 各自连了哪些代理端口。
+ * 想知道「哪个子进程在联网」就必须按 pid 拆开 —— 只看并集会错认联网者。
+ */
+export function parseProxyConnections(lsofOutput, pids) {
   const wanted = new Set(pids ?? []);
-  if (!wanted.size) return [];
+  const empty = { ports: [], byPid: new Map() };
+  if (!wanted.size) return empty;
 
   const ownPorts = new Set();
   // 端口 → 监听它的程序名。lsof 一次就带回来了，不用额外跑命令。
@@ -314,6 +334,7 @@ export function parseProxyPorts(lsofOutput, pids) {
   }
 
   const ports = new Set();
+  const byPid = new Map();
   for (const cols of rows) {
     // 形如 127.0.0.1:54328->127.0.0.1:8899
     const m = /->127\.0\.0\.1:(\d+)/.exec(cols[8] ?? "");
@@ -327,8 +348,11 @@ export function parseProxyPorts(lsofOutput, pids) {
       if (!owner || !PROXY_LISTENER.test(owner)) continue;
     }
     ports.add(port);
+    const pid = Number(cols[1]);
+    if (!byPid.has(pid)) byPid.set(pid, new Set());
+    byPid.get(pid).add(port);
   }
-  return [...ports].sort((a, b) => a - b);
+  return { ports: [...ports].sort((a, b) => a - b), byPid };
 }
 
 /**
@@ -363,12 +387,10 @@ export async function codexDesktopProxyPorts() {
       .filter((line) => line.includes("codex-cli/CodexCLI.app/Contents/MacOS/codex"))
       .map((line) => Number(line.trim().split(/\s+/)[0]))
       .filter((n) => Number.isFinite(n) && n > 0);
-    const ports = new Set();
-    for (const pid of pids) {
-      const found = await processProxyPort(pid);
-      for (const port of found ?? []) ports.add(port);
-    }
-    return { pids, ports: [...ports] };
+    // 复用带过滤的解析 —— 之前逐 pid 裸数端口，连 codex 自己的内部
+    // 回环端口都会被当成代理。
+    const { ports } = await proxyPortsForPids(pids);
+    return { pids, ports };
   } catch {
     return { pids: [], ports: [] };
   }
@@ -390,8 +412,9 @@ export async function processProxyPort(pid) {
       const m = /->127\.0\.0\.1:(\d+)/.exec(line);
       if (m) ports.add(Number(m[1]));
     }
-    // 只关心里程碑端口：7897 这类是 Clash，8899 是 tunless
-    return [...ports];
+    // 只保留已知代理端口 —— 之前任何回环目标都算数，
+    // 进程连自己内部的 IPC 端口都会被报成「在走代理」。
+    return [...ports].filter((p) => KNOWN_PROXY_PORTS.has(p));
   } catch {
     return null;
   }
@@ -779,7 +802,7 @@ export async function openApp(app, env) {
  *
  * 返回 null 表示「无法判断」，调用方必须如实说未知，不许猜。
  */
-export async function processProxyEnv(pid) {
+export async function processProxyEnv(pid, tunlessPort = 8899) {
   if (!pid) return null;
   // 进程不存在时 processProxyPort 会给空数组，但那不是「没代理」，
   // 而是「没有这个进程」。先确认它活着，别把「不存在」说成「没走代理」。
@@ -791,10 +814,10 @@ export async function processProxyEnv(pid) {
   try {
     const ports = await processProxyPort(pid);
     if (!ports?.length) return { pid, httpsProxy: null, allProxy: null, noProxy: null, hasProxy: null };
-    const viaTunless = ports.includes(8899);
+    const viaTunless = ports.includes(tunlessPort);
     return {
       pid,
-      httpsProxy: viaTunless ? "http://127.0.0.1:8899" : `http://127.0.0.1:${ports[0]}`,
+      httpsProxy: `http://127.0.0.1:${viaTunless ? tunlessPort : ports[0]}`,
       allProxy: null,
       noProxy: null,
       hasProxy: true,
@@ -807,25 +830,62 @@ export async function processProxyEnv(pid) {
 
 /**
  * 应用里真正负责联网的子进程。
- * Antigravity 是 language_server（Go），Cursor 是 Plugin Helper。
- * 主进程只是壳子，查它的环境没有意义。
+ *
+ * 旧版按写死的进程路径猜：Cursor 是 "Cursor Helper (Plugin).app"，
+ * Antigravity 是 language_server。现行 Cursor 的 helper 早就不叫
+ * Plugin 了（统一叫 "Cursor Helper"，运行时还会改名成
+ * "Cursor Helper: mcp-process" 这类标题），于是应用明明在跑、
+ * 也连着 8899，这里却返回 null，doctor 直接报「没在运行」。
+ *
+ * 改成看**行为证据**：整棵进程树里谁真的连着代理端口，谁就是联网
+ * 进程（appProxyPorts 的 byPid 已经算好了）；还没有代理连接时
+ * （应用刚启动）才退回到按名字猜。
  */
 export async function networkPid(app) {
   if (!app) return null;
-  if (app.id === "codex") return (await appProxyPorts(app)).pids[0] ?? null;
+  const conn = await appProxyPorts(app);
+  if (app.id === "codex") return conn.pids[0] ?? null;
+
+  // 1. 已经有代理连接的子进程：这就是联网者，证据最硬。
+  if (conn.byPid?.size) {
+    let best = null;
+    let bestCount = -1;
+    for (const [pid, ports] of conn.byPid) {
+      if (ports.size > bestCount) {
+        best = pid;
+        bestCount = ports.size;
+      }
+    }
+    if (best) return best;
+  }
+
   try {
     const { stdout } = await exec("ps", ["-Ao", "pid=,command="], {
       timeout: 8000,
       maxBuffer: 32 * 1024 * 1024,
     });
+    const lines = stdout.split("\n");
+    // 2. 还没有代理连接：按应用类型猜一个最可能联网的进程。
     const patterns =
       app.id === "antigravity"
         ? [`/${app.bundle}.app/Contents/Resources/bin/language_server`]
-        : [`/${app.bundle}.app/Contents/Frameworks/${app.bundle} Helper (Plugin).app/`];
-    const line = stdout.split("\n").find((l) => patterns.some((p) => l.includes(p)));
-    if (!line) return null;
-    const pid = Number(line.trim().split(/\s+/)[0]);
-    return Number.isFinite(pid) && pid > 0 ? pid : null;
+        : [
+            `/${app.bundle}.app/Contents/Frameworks/${app.bundle} Helper`,
+            `/${app.bundle}.app/Contents/MacOS/${app.bundle}`,
+          ];
+    for (const pattern of patterns) {
+      const line = lines.find((l) => l.includes(pattern));
+      if (!line) continue;
+      const pid = Number(line.trim().split(/\s+/)[0]);
+      if (Number.isFinite(pid) && pid > 0) return pid;
+    }
+    // 3. 兜底：整棵树里随便一个非主进程都比没有强。
+    const line = lines.find((l) => l.includes(`/${app.bundle}.app/`));
+    if (line) {
+      const pid = Number(line.trim().split(/\s+/)[0]);
+      if (Number.isFinite(pid) && pid > 0) return pid;
+    }
+    return null;
   } catch {
     return null;
   }

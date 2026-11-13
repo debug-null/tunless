@@ -206,14 +206,21 @@ export function discoverAll() {
 
 export async function listProcesses() {
   try {
-    const { stdout } = await exec("ps", ["-eo", "pid=,comm="]);
+    // 用 command 而不是 comm：comm 是进程自己改的名字（比如
+    // "Cursor Helper: shared-process"），不是可执行文件路径；
+    // command 的 argv[0] 才是磁盘上的二进制，才能拿去查代理符号。
+    const { stdout } = await exec("ps", ["-eo", "pid=,command="]);
     return stdout
       .split("\n")
       .map((line) => line.trim())
       .filter(Boolean)
       .map((line) => {
         const idx = line.indexOf(" ");
-        return { pid: Number(line.slice(0, idx)), comm: line.slice(idx + 1) };
+        const pid = Number(line.slice(0, idx));
+        const command = line.slice(idx + 1);
+        const argv0 = command.split(/\s+/)[0] ?? "";
+        const comm = argv0.split("/").pop() ?? argv0;
+        return { pid, comm, command, binary: argv0 };
       })
       .filter((p) => Number.isFinite(p.pid));
   } catch {
@@ -231,10 +238,66 @@ export async function systemProxyState() {
     return {
       httpEnabled: read("HTTPEnable") === "1",
       httpsEnabled: read("HTTPSEnable") === "1",
+      socksEnabled: read("SOCKSEnable") === "1",
       host: read("HTTPProxy"),
       port: read("HTTPPort"),
+      httpsHost: read("HTTPSProxy"),
+      httpsPort: read("HTTPSPort"),
+      socksHost: read("SOCKSProxy"),
+      socksPort: read("SOCKSPort"),
     };
   } catch {
     return null;
   }
+}
+
+/**
+ * 当前系统解析器名单（scutil --dns）。
+ * 返回 [{nameservers: [], domain: null|string}]，按 resolver 顺序排。
+ * 带 domain 的是 supplemental resolver —— 分离解析网络里内网 DNS 的位置。
+ */
+export async function systemDnsResolvers() {
+  try {
+    const { stdout } = await exec("scutil", ["--dns"], { timeout: 8000 });
+    const resolvers = [];
+    let current = null;
+    for (const line of stdout.split("\n")) {
+      const trimmed = line.trim();
+      if (/^resolver #\d+/.test(trimmed)) {
+        current = { nameservers: [], domain: null };
+        resolvers.push(current);
+        continue;
+      }
+      if (!current) continue;
+      const ns = /^nameserver\[\d+\]\s*:\s*(\S+)/.exec(trimmed);
+      if (ns) current.nameservers.push(ns[1]);
+      const dom = /^domain\s*:\s*(\S+)/.exec(trimmed);
+      if (dom) current.domain = dom[1];
+    }
+    return resolvers;
+  } catch {
+    return [];
+  }
+}
+
+const PRIVATE_DNS_RE = /^(10\.|127\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/;
+
+/**
+ * 猜内网 DNS 是哪一个。
+ *
+ * 顺序：显式参数 > 分离解析的 supplemental resolver > 主 resolver 里的私网地址
+ * > 兜底默认。公司网络里主 DNS 往往就是内网 DNS；家里/公共网络拿不到私网
+ * 解析器就退回默认值，让调用方再用活性探测决定要不要跳过内网分类。
+ */
+export async function resolveInternalDns(explicit, fallback = "10.249.150.130") {
+  if (explicit) return explicit;
+  const resolvers = await systemDnsResolvers();
+  for (const r of resolvers) {
+    if (!r.domain) continue;
+    const hit = r.nameservers.find((ns) => PRIVATE_DNS_RE.test(ns));
+    if (hit) return hit;
+  }
+  const primary = resolvers[0]?.nameservers ?? [];
+  const privateNs = primary.find((ns) => PRIVATE_DNS_RE.test(ns));
+  return privateNs ?? fallback;
 }

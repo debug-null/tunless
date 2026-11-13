@@ -6,6 +6,7 @@ import {
   hostMatchesSuffix,
   splitHostPort,
   normalizeHost,
+  rewriteHead,
 } from "../src/core/relay.js";
 
 const suffixes = ["17usoft.com", "cdb.17usoft.com", "17u.cn"];
@@ -186,4 +187,121 @@ test("上游只有 HTTP 代理时 CONNECT 依然能用", async () => {
   await relay.stop();
   await proxy.closeAll();
   await echo.closeAll();
+});
+
+// 回归：rewriteHead 之前保留原始 Host 又无条件加一个，
+// 报文里出现两个 Host 头，严格的源站直接 400。
+test("rewriteHead 只产生一个 Host 头", () => {
+  const head = {
+    headers: [
+      ["Host", "old.example.com:80"],
+      ["User-Agent", "curl/8"],
+      ["Proxy-Connection", "keep-alive"],
+      ["Proxy-Authorization", "Basic x"],
+      ["Accept", "*/*"],
+    ],
+  };
+  const out = rewriteHead(head, {
+    method: "GET",
+    path: "/a?b=1",
+    host: "new.example.com:8080",
+  });
+  const hostLines = out.split("\r\n").filter((l) => /^host:/i.test(l));
+  assert.equal(hostLines.length, 1);
+  assert.equal(hostLines[0], "Host: new.example.com:8080");
+  assert.ok(!out.includes("Proxy-Connection"));
+  assert.ok(!out.includes("Proxy-Authorization"));
+  assert.ok(out.includes("User-Agent: curl/8"));
+});
+
+// 回归：上游把握手应答和首个隧道数据打进同一个 TCP 段时，
+// 之前会把跟随的字节丢掉，客户端一直等不到响应。
+test("CONNECT 通道不丢上游应答后紧跟的字节", async () => {
+  const netmod = await import("node:net");
+  const { HttpProxyServer } = await import("../src/core/relay.js");
+
+  const sockets = new Set();
+  const track = (server) => {
+    server.on("connection", (s) => {
+      sockets.add(s);
+      s.on("close", () => sockets.delete(s));
+    });
+    return server;
+  };
+  const closeAll = (server) =>
+    new Promise((resolve) => {
+      for (const s of sockets) s.destroy();
+      server.close(resolve);
+    });
+
+  // 假上游 HTTP 代理：CONNECT 应答和「提前到达的隧道数据」一次写出。
+  const proxy = track(
+    netmod.createServer((socket) => {
+      socket.once("data", () => {
+        socket.write("HTTP/1.1 200 Connection Established\r\n\r\n" + "EARLY-BYTES");
+        socket.on("data", () => {});
+      });
+      socket.on("error", () => {});
+    }),
+  );
+  await new Promise((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+  const proxyPort = proxy.address().port;
+
+  const relay = new HttpProxyServer({
+    port: 18903,
+    upstream: { host: "127.0.0.1", port: proxyPort, protocols: ["socks5-not-really"] },
+    internalDns: null,
+    log: () => {},
+  });
+  // 绕过协议选择，直接验证 socks 路径的 early 转发：
+  // protocols 不含 http 时走 openUpstreamSocks —— 这里用 HTTP 协议的 fake
+  // 上游不行，所以换成直接测试 openUpstreamHttp。
+  const { openUpstreamHttp } = await import("../src/core/relay.js");
+  const tunnel = await openUpstreamHttp(
+    { host: "127.0.0.1", port: proxyPort },
+    "anything.test",
+    443,
+  );
+  assert.ok(tunnel.early?.length > 0, "握手包后面的字节没有被保留");
+  assert.equal(tunnel.early.toString("latin1"), "EARLY-BYTES");
+  tunnel.destroy();
+
+  await relay.stop().catch(() => {});
+  await closeAll(proxy);
+});
+
+// socks5 上游同理：SOCKS 应答后紧跟的隧道数据必须进 socket.early。
+test("SOCKS5 握手后的早到字节不丢", async () => {
+  const netmod = await import("node:net");
+  const { openUpstreamSocks } = await import("../src/core/relay.js");
+
+  const sockets = new Set();
+  const fake = netmod.createServer((socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+    let stage = 0;
+    socket.on("data", () => {
+      if (stage === 0) {
+        stage = 1;
+        socket.write(Buffer.from([5, 0]));
+      } else if (stage === 1) {
+        stage = 2;
+        // SOCKS5 CONNECT 应答 + 同一包里紧跟隧道数据
+        const reply = Buffer.from([5, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+        socket.write(Buffer.concat([reply, Buffer.from("SNEAKY")]));
+      }
+    });
+    socket.on("error", () => {});
+  });
+  await new Promise((resolve) => fake.listen(0, "127.0.0.1", resolve));
+
+  const tunnel = await openUpstreamSocks(
+    { host: "127.0.0.1", port: fake.address().port },
+    "example.test",
+    443,
+  );
+  assert.equal(tunnel.early?.toString("latin1"), "SNEAKY");
+  tunnel.destroy();
+  for (const s of sockets) s.destroy();
+  await new Promise((resolve) => fake.close(resolve));
 });

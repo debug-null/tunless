@@ -18,11 +18,6 @@ const IGNORED_TLD = new Set([
   "woff2", "ttf", "eot", "map", "min", "d", "php", "vue", "swift", "kt",
 ]);
 
-const STATIC_TLDS = new Set([
-  "com", "cn", "net", "org", "io", "dev", "co", "me", "cn", "edu", "gov",
-  "mil", "int", "info", "biz", "name", "pro", "xyz", "top", "site", "online",
-]);
-
 /**
  * 权限不足时给出的授权指引。
  * 要写清楚「在哪个设置面板、加哪个应用」，否则用户不知道怎么操作。
@@ -171,9 +166,11 @@ export function scanChromeHistory() {
   return { hosts: [...hosts], sources: ["chrome-history"], notes: [] };
 }
 
-export async function scanAll({ repoRoots = [], includeChrome = true } = {}) {
+export async function scanAll({ repoRoots = [], includeChrome = true, logDir = null } = {}) {
   const shell = scanShellHistory();
-  const clash = scanClashLogs(shell.clashLogDir);
+  // Clash 日志目录由调用方从客户端发现结果里带进来；
+  // 之前误用了 shell.clashLogDir（不存在的字段），这个数据源一直是死的。
+  const clash = scanClashLogs(logDir);
   const chrome = includeChrome ? scanChromeHistory() : { hosts: [], sources: [], notes: [] };
   const repos = await scanRepos(repoRoots);
 

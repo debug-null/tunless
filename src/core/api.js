@@ -97,19 +97,35 @@ export class MihomoApi {
   }
 }
 
+/**
+ * 并发探所有候选，第一个能回话的胜出。
+ * 之前是串行：wmsxwd 之外再挂几个无效候选，每个都要等满 8s 超时，
+ * 界面上就是「找内核」这一步卡二三十秒。
+ */
 export async function probeApi(candidates) {
-  const failures = [];
-  for (const candidate of candidates) {
-    const api = new MihomoApi(candidate);
-    try {
-      const info = await api.version();
-      return { api, info, candidate };
-    } catch (err) {
-      failures.push({ candidate, error: err.message });
-    }
+  if (!candidates?.length) {
+    throw new Error("找不到可达的 mihomo 接口：没有候选地址");
   }
-  const detail = failures.map((f) => `  - ${new MihomoApi(f.candidate).descriptor}: ${f.error}`).join("\n");
-  const error = new Error(`找不到可达的 mihomo 接口：\n${detail}`);
-  error.failures = failures;
-  throw error;
+  const failures = [];
+  return await new Promise((resolve, reject) => {
+    let remaining = candidates.length;
+    for (const candidate of candidates) {
+      const api = new MihomoApi(candidate);
+      api
+        .version()
+        .then((info) => resolve({ api, info, candidate }))
+        .catch((err) => {
+          failures.push({ candidate, error: err.message });
+          remaining -= 1;
+          if (remaining === 0) {
+            const detail = failures
+              .map((f) => `  - ${new MihomoApi(f.candidate).descriptor}: ${f.error}`)
+              .join("\n");
+            const error = new Error(`找不到可达的 mihomo 接口：\n${detail}`);
+            error.failures = failures;
+            reject(error);
+          }
+        });
+    }
+  });
 }

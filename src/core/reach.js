@@ -148,18 +148,20 @@ export async function checkTargets({
   targets = [],
   timeoutMs = 8000,
 } = {}) {
-  const results = [];
-  for (const target of targets) {
-    const res = await checkReachability({
-      host,
-      port,
-      target: target.host,
-      targetPort: target.port ?? 443,
-      targetPath: target.path ?? "/",
-      timeoutMs,
-    });
-    results.push({ ...target, ...res });
-  }
+  // 并发测 —— 之前串行：四个目标、每个最多 8s，第 4 步最坏要等 36 秒。
+  const results = await Promise.all(
+    targets.map(async (target) => {
+      const res = await checkReachability({
+        host,
+        port,
+        target: target.host,
+        targetPort: target.port ?? 443,
+        targetPath: target.path ?? "/",
+        timeoutMs,
+      });
+      return { ...target, ...res };
+    }),
+  );
   return summarizeResults(results);
 }
 

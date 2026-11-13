@@ -148,6 +148,20 @@ export async function installService({ args = [], logDir = LOG_DIR } = {}) {
   fs.mkdirSync(logDir, { recursive: true });
   fs.mkdirSync(AGENT_DIR, { recursive: true });
 
+  // 日志不会自己轮转，launchd 也没有 newsyslog 那套。重装时把上一代的
+  // 日志改名留存，新进程从干净文件写起 —— 否则 proxy.log 会无限膨胀，
+  // `service logs` 只能看到末尾几十行，等于没有历史。
+  for (const name of ["proxy.log", "proxy.err.log"]) {
+    const file = path.join(logDir, name);
+    try {
+      if (fs.statSync(file).size > 512 * 1024) {
+        fs.renameSync(file, `${file}.prev`);
+      }
+    } catch {
+      // 文件不存在或改名失败都不影响安装
+    }
+  }
+
   // launchd 起进程时 PATH 是空的，所以 node 必须写绝对路径。
   //
   // 但这里有个坑：直接用 process.execPath 会把「当前那次」的 node 路径写死。
@@ -223,9 +237,17 @@ export async function restartService({ port = 8899, timeoutMs = 15000 } = {}) {
   return startService({ port, timeoutMs });
 }
 
-/** 停止服务，并等到任务真的从 launchd 里消失，避免界面读到过期的 pid。 */
+/**
+ * 停止服务，并等到任务真的从 launchd 里消失，避免界面读到过期的 pid。
+ *
+ * 停了就要把登录会话里的代理变量清掉：变量还指着 8899，但服务已经
+ * 不在了 —— 从 Dock 点开应用会得到「所有外网都连不上」。之前只有
+ * uninstall 清，TUI 里按 S 停服务、CLI 的 service stop 都会留下
+ * 这个坑。（重启场景不用担心：服务启动时会用 --session-env 重新写回。）
+ */
 export async function stopService({ timeoutMs = 5000 } = {}) {
   await launchctl(["bootout", `${guiDomain()}/${LABEL}`], { ignoreFailure: true });
+  await clearSessionProxyEnv();
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const status = await serviceStatus();
@@ -266,8 +288,16 @@ export async function sidecarReachable(host, port, timeoutMs = 800) {
   });
 }
 export function readServiceLog(lines = 20, logDir = LOG_DIR) {
-  const file = path.join(logDir, "proxy.log");
-  if (!fs.existsSync(file)) return "";
-  const text = fs.readFileSync(file, "utf8").split("\n");
-  return text.slice(-lines).join("\n");
+  // 崩溃信息在 err 日志（env: node 找不到之类全在这里），
+  // 只给 proxy.log 会让「服务根本起不来」看起来一片安静。
+  const sections = [];
+  for (const [name, file] of [
+    ["proxy.log", path.join(logDir, "proxy.log")],
+    ["proxy.err.log", path.join(logDir, "proxy.err.log")],
+  ]) {
+    if (!fs.existsSync(file)) continue;
+    const tail = fs.readFileSync(file, "utf8").split("\n").slice(-lines).join("\n").trim();
+    if (tail) sections.push(`── ${name} ──\n${tail}`);
+  }
+  return sections.join("\n\n");
 }

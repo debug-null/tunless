@@ -48,16 +48,28 @@ export function decideRouteWithRules(host, { internalSuffixes = [], rules = null
 /**
  * 域名没命中任何规则、但解析出的 IP 落在用户填的网段里时，也算内网。
  * 这需要一次 DNS 查询，所以只在准备连上游之前做（失败就当公网）。
+ *
+ * cache 是可选的 Map：每条 CONNECT 都打一次内网 DNS 太贵（也把访问目标
+ * 泄给公司 DNS），判定结果按 60s TTL 缓存。
  */
-export async function routeByIpRules(host, rules, internalDns, timeout = 1500) {
+export async function routeByIpRules(host, rules, internalDns, timeout = 1500, cache = null) {
   if (!rules?.cidr?.length || !internalDns) return null;
+  const key = normalizeHost(host);
+  const cached = cache?.get(key);
+  if (cached && cached.expire > Date.now()) return cached.value;
   const res = await queryA(host, internalDns, { timeout });
-  if (!res.ok || !res.ips.length) return null;
-  for (const ip of res.ips) {
-    const hit = matchIpRules(ip, rules);
-    if (hit) return { ip, rule: hit };
+  let value = null;
+  if (res.ok && res.ips.length) {
+    for (const ip of res.ips) {
+      const hit = matchIpRules(ip, rules);
+      if (hit) {
+        value = { ip, rule: hit };
+        break;
+      }
+    }
   }
-  return null;
+  cache?.set(key, { value, expire: Date.now() + 60_000 });
+  return value;
 }
 
 export function splitHostPort(target, defaultPort) {
@@ -75,13 +87,19 @@ export function splitHostPort(target, defaultPort) {
   return { host: value.slice(0, idx), port: Number(value.slice(idx + 1)) || defaultPort };
 }
 
-export async function resolveInternal(host, internalDns, timeout = 3000) {
+export async function resolveInternal(host, internalDns, timeout = 3000, cache = null) {
   if (!internalDns) return null;
+  const key = normalizeHost(host);
+  const cached = cache?.get(key);
+  if (cached && cached.expire > Date.now()) return cached.ip;
   const res = await queryA(host, internalDns, { timeout });
-  if (!res.ok || !res.ips.length) return null;
   // Prefer a private address; a fake-ip answer means the core still hijacks it.
-  const privateIp = res.ips.find((ip) => !ip.startsWith("198.18."));
-  return privateIp ?? null;
+  const ip =
+    res.ok && res.ips.length
+      ? (res.ips.find((item) => !item.startsWith("198.18.")) ?? null)
+      : null;
+  cache?.set(key, { ip, expire: Date.now() + 30_000 });
+  return ip;
 }
 
 function readHead(socket, onHead) {
@@ -94,6 +112,9 @@ function readHead(socket, onHead) {
       return;
     }
     socket.off("data", onData);
+    // 摘掉 onData 后 socket 仍在 flowing 模式：从这里到调用方 pipe 之间
+    // 到达的字节会被悄悄丢掉。先暂停，pipe 时自动恢复。
+    socket.pause();
     onHead(buffer.subarray(0, idx).toString("utf8"), buffer.subarray(idx + 4));
   };
   socket.on("data", onData);
@@ -111,10 +132,13 @@ function parseHead(text) {
   return { method, target, version, headers };
 }
 
-function rewriteHead(head, { method, path, host }) {
+// 导出给单测：Host 头去重是个回归点，要能直接验证。
+export function rewriteHead(head, { method, path, host }) {
   const kept = head.headers.filter(([name]) => {
     const lower = name.toLowerCase();
-    return lower !== "proxy-connection" && lower !== "proxy-authorization";
+    // host 也要滤掉 —— 之前保留原 Host 又无条件 push 一个，报文里出现
+    // 两个 Host 头，严格一点的源站直接回 400。
+    return lower !== "proxy-connection" && lower !== "proxy-authorization" && lower !== "host";
   });
   kept.push(["Host", host]);
   return [
@@ -132,19 +156,45 @@ function rewriteHead(head, { method, path, host }) {
 // 以前这里写死 SOCKS5 —— 那是 mihomo 混合端口的能力。但 Surge / Stash 这类
 // 只提供 HTTP 代理的客户端没有 SOCKS5，写死会让它们整条链路全废。
 // 所以按上游实际支持的协议挑：有 SOCKS5 用 SOCKS5，否则退到 HTTP CONNECT。
+/**
+ * 给一段握手流程套一个总 deadline。之前只在 connect 阶段有超时：
+ * 上游接受了 TCP 但握手不回话时，readBytes 会永远挂住。
+ */
+function withDeadline(socket, promise, timeout, message) {
+  let timer;
+  const boom = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      socket.destroy();
+      reject(new Error(message));
+    }, timeout);
+  });
+  return Promise.race([promise, boom]).finally(() => clearTimeout(timer));
+}
+
 export async function openUpstreamSocks(upstream, host, port, timeout = 8000) {
   const socket = net.connect(upstream.port, upstream.host);
+  try {
+    return await withDeadline(
+      socket,
+      openUpstreamSocksCore(socket, host, port),
+      timeout,
+      "上游 SOCKS5 握手超时",
+    );
+  } catch (err) {
+    socket.destroy();
+    throw err;
+  }
+}
+
+async function openUpstreamSocksCore(socket, host, port) {
   await new Promise((resolve, reject) => {
     socket.once("connect", resolve);
     socket.once("error", reject);
-    socket.setTimeout(timeout, () => reject(new Error("上游 SOCKS5 握手超时")));
   });
-  socket.setTimeout(0);
 
   socket.write(Buffer.from([5, 1, 0]));
   const greeting = await readBytes(socket, 2);
   if (!greeting || greeting[0] !== 5 || greeting[1] !== 0) {
-    socket.destroy();
     throw new Error("上游拒绝了 SOCKS5 握手");
   }
 
@@ -161,34 +211,51 @@ export async function openUpstreamSocks(upstream, host, port, timeout = 8000) {
   socket.write(request);
   const head = await readBytes(socket, 4);
   if (!head) {
-    socket.destroy();
     throw new Error("上游 SOCKS5 在请求期间关闭连接");
   }
   const reply = await readBytes(socket, head[3] === 1 ? 4 : head[3] === 4 ? 16 : 1);
   const portBuf = await readBytes(socket, 2);
-  if (!head || head[1] !== 0) {
-    socket.destroy();
-    throw new Error(`上游 SOCKS5 拒绝 CONNECT（错误码 ${head?.[1]}）`);
+  if (head[1] !== 0) {
+    throw new Error(`上游 SOCKS5 拒绝 CONNECT（错误码 ${head[1]}）`);
   }
   void reply;
   void portBuf;
+  // 握手包之后可能立刻跟着隧道数据（上游把 SOCKS 应答和 TLS ServerHello
+  // 打在同一个段里）。reader 把它们缓冲在 state.buf 里 —— 不带走也不
+  // 摘除 reader 的话，这些字节会永远丢在缓冲区，隧道随后一直挂着没响应。
+  // 另外 reader 的 onData 不摘掉，pipe 之后每个字节都会被双份缓存，长连接
+  // 撑满内存。
+  socket.early = drainBuffered(socket);
+  releaseReader(socket);
   return socket;
 }
 
 /** HTTP CONNECT 隧道，用于只支持 HTTP 代理的上游（Surge / Stash / Privoxy） */
 export async function openUpstreamHttp(upstream, host, port, timeout = 8000) {
   const socket = net.connect(upstream.port, upstream.host);
+  try {
+    return await withDeadline(
+      socket,
+      openUpstreamHttpCore(socket, host, port),
+      timeout,
+      "上游 HTTP 代理握手超时",
+    );
+  } catch (err) {
+    socket.destroy();
+    throw err;
+  }
+}
+
+async function openUpstreamHttpCore(socket, host, port) {
   await new Promise((resolve, reject) => {
     socket.once("connect", resolve);
     socket.once("error", reject);
-    socket.setTimeout(timeout, () => reject(new Error("上游 HTTP 代理连接超时")));
   });
-  socket.setTimeout(0);
 
   socket.write(
     `CONNECT ${host}:${port} HTTP/1.1\r\nHost: ${host}:${port}\r\nProxy-Connection: keep-alive\r\n\r\n`,
   );
-  const head = await new Promise((resolve, reject) => {
+  const { head, rest } = await new Promise((resolve, reject) => {
     let buffer = Buffer.alloc(0);
     const onData = (chunk) => {
       buffer = Buffer.concat([buffer, chunk]);
@@ -198,7 +265,12 @@ export async function openUpstreamHttp(upstream, host, port, timeout = 8000) {
         return;
       }
       socket.off("data", onData);
-      resolve(buffer.subarray(0, idx).toString("utf8"));
+      // 响应头之后紧跟的字节是隧道里提前到达的数据，必须交还给调用方
+      // 转发给客户端 —— 之前直接丢掉，客户端会等一段永远不会再来的数据。
+      resolve({
+        head: buffer.subarray(0, idx).toString("utf8"),
+        rest: buffer.subarray(idx + 4),
+      });
     };
     socket.on("data", onData);
     socket.once("error", reject);
@@ -207,9 +279,11 @@ export async function openUpstreamHttp(upstream, host, port, timeout = 8000) {
 
   const status = Number(/^HTTP\/1\.[01] (\d{3})/.exec(head.split(CRLF)[0])?.[1] ?? 0);
   if (!status || status >= 300) {
-    socket.destroy();
     throw new Error(`上游 HTTP 代理拒绝 CONNECT（${status || "无状态码"}）`);
   }
+  // 同 readHead：防止摘掉监听到调用方 pipe 之间的窗口丢字节。
+  socket.pause();
+  socket.early = rest?.length ? rest : null;
   return socket;
 }
 
@@ -243,6 +317,10 @@ export class HttpProxyServer {
     this.rules = rules;
     this.log = log;
     this.server = null;
+    // 判定结果缓存：加了 CIDR 规则后每条 CONNECT 都要打内网 DNS，
+    // 不缓存会把每个请求拖慢 1.5s。
+    this.ipRouteCache = new Map();
+    this.dnsCache = new Map();
   }
 
   start() {
@@ -286,7 +364,12 @@ export class HttpProxyServer {
     this.sockets ??= new Set();
     this.sockets.add(socket);
     socket.once("close", () => this.sockets.delete(socket));
+    // 请求头没发完之前的空闲超时 —— 扫描器连上不说话会一直占着 fd。
+    // 头解析完立刻清掉，长隧道不受它管。
+    socket.setTimeout(15000);
+    socket.once("timeout", () => socket.destroy());
     readHead(socket, (text, rest) => {
+      socket.setTimeout(0);
       const head = parseHead(text);
       if (head.method === "CONNECT") {
         this.handleConnect(socket, head, rest);
@@ -303,13 +386,13 @@ export class HttpProxyServer {
       rules: this.rules,
     });
     if (route === "upstream") {
-      const byIp = await routeByIpRules(host, this.rules, this.internalDns);
+      const byIp = await routeByIpRules(host, this.rules, this.internalDns, 1500, this.ipRouteCache);
       if (byIp) route = "internal";
     }
     this.log(`CONNECT ${host}:${port} -> ${route}`);
 
     if (route === "internal") {
-      const ip = await resolveInternal(host, this.internalDns);
+      const ip = await resolveInternal(host, this.internalDns, 3000, this.dnsCache);
       if (!ip) {
         socket.end("HTTP/1.1 502 Bad Gateway\r\n\r\n");
         return;
@@ -341,8 +424,10 @@ export class HttpProxyServer {
             .map(([n, v]) => `${n}: ${v}`)
             .join("\r\n")}\r\n\r\n`,
         );
-        readHead(upstreamSocket, (text) => {
+        readHead(upstreamSocket, (text, upstreamRest) => {
           socket.write(`${text}\r\n\r\n`);
+          // 上游响应头之后可能紧跟隧道里提前到达的数据 —— 必须转给客户端。
+          if (upstreamRest?.length) socket.write(upstreamRest);
           upstreamSocket.write(rest ?? Buffer.alloc(0));
           socket.pipe(upstreamSocket);
           upstreamSocket.pipe(socket);
@@ -365,6 +450,7 @@ export class HttpProxyServer {
       return;
     }
     socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+    if (upstreamSocket.early?.length) socket.write(upstreamSocket.early);
     upstreamSocket.write(rest ?? Buffer.alloc(0));
     socket.pipe(upstreamSocket);
     upstreamSocket.pipe(socket);
@@ -391,7 +477,7 @@ export class HttpProxyServer {
       rules: this.rules,
     });
     if (route === "upstream") {
-      const byIp = await routeByIpRules(host, this.rules, this.internalDns);
+      const byIp = await routeByIpRules(host, this.rules, this.internalDns, 1500, this.ipRouteCache);
       if (byIp) route = "internal";
     }
     this.log(`GET ${host}:${port} -> ${route}`);
@@ -417,6 +503,7 @@ export class HttpProxyServer {
           }),
         );
         tunnel.write(rest ?? Buffer.alloc(0));
+        if (tunnel.early?.length) socket.write(tunnel.early);
         socket.pipe(tunnel);
         tunnel.pipe(socket);
         tunnel.on("error", () => socket.destroy());
@@ -441,7 +528,7 @@ export class HttpProxyServer {
       return;
     }
 
-    const ip = await resolveInternal(host, this.internalDns);
+    const ip = await resolveInternal(host, this.internalDns, 3000, this.dnsCache);
     if (!ip) {
       socket.end("HTTP/1.1 502 Bad Gateway\r\n\r\n");
       return;
@@ -481,6 +568,8 @@ export class Socks5Server {
     this.rules = rules;
     this.log = log;
     this.server = null;
+    this.ipRouteCache = new Map();
+    this.dnsCache = new Map();
   }
 
   start() {
@@ -524,6 +613,9 @@ export class Socks5Server {
     this.sockets ??= new Set();
     this.sockets.add(socket);
     socket.once("close", () => this.sockets.delete(socket));
+    // 握手阶段空闲超时：连上不发数据的连接之前会永远占着 fd。
+    socket.setTimeout(15000);
+    socket.once("timeout", () => socket.destroy());
     const greeting = await readBytes(socket, 2);
     if (!greeting || greeting[0] !== 5) return socket.destroy();
     await readBytes(socket, greeting[1]);
@@ -540,7 +632,7 @@ export class Socks5Server {
       rules: this.rules,
     });
     if (route === "upstream") {
-      const byIp = await routeByIpRules(host, this.rules, this.internalDns);
+      const byIp = await routeByIpRules(host, this.rules, this.internalDns, 1500, this.ipRouteCache);
       if (byIp) route = "internal";
     }
     this.log(`SOCKS5 CONNECT ${host}:${port} -> ${route}`);
@@ -548,7 +640,7 @@ export class Socks5Server {
     let upstreamSocket;
     try {
       if (route === "internal") {
-        const ip = await resolveInternal(host, this.internalDns);
+        const ip = await resolveInternal(host, this.internalDns, 3000, this.dnsCache);
         if (!ip) {
           socket.write(Buffer.from([5, 1, 0, 1, 0, 0, 0, 0, 0, 0]));
           return socket.destroy();
@@ -567,9 +659,15 @@ export class Socks5Server {
       return socket.destroy();
     }
 
+    // 下游客户端这边也要把 reader 缓冲区里攒的字节先送出去 ——
+    // SOCKS 握手和首个数据包粘在一个段里时，多余字节存在 buf 里。
+    const clientEarly = drainBuffered(socket);
     releaseReader(socket);
     releaseReader(upstreamSocket);
+    socket.setTimeout(0);
     socket.write(Buffer.from([5, 0, 0, 1, 0, 0, 0, 0, 0, 0]));
+    if (upstreamSocket.early?.length) socket.write(upstreamSocket.early);
+    if (clientEarly?.length) upstreamSocket.write(clientEarly);
     socket.pipe(upstreamSocket);
     upstreamSocket.pipe(socket);
     upstreamSocket.on("error", () => socket.destroy());
@@ -635,6 +733,16 @@ function releaseReader(socket) {
   socket.off("close", state.onEnd);
   socket.__tunlessReader = null;
   socket.pause();
+}
+
+// 把 reader 缓冲区里已经收到、但还没被协议读走的字节取出来。
+// SOCKS/HTTP 握手的最后一段常和下一个协议的数据包粘在一起，不取就丢。
+function drainBuffered(socket) {
+  const state = socket.__tunlessReader;
+  if (!state || !state.buf.length) return null;
+  const rest = Buffer.from(state.buf);
+  state.buf = Buffer.alloc(0);
+  return rest;
 }
 
 async function readAddress(socket, atyp) {

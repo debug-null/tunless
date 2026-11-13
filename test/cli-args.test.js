@@ -31,3 +31,37 @@ test("--key=value 形式不受影响", () => {
   const e = parseArgs(["fix", "--internal-dns=10.0.0.1"]);
   assert.equal(e.flags["internal-dns"], "10.0.0.1");
 });
+
+// 回归：以前只认 --yes，单横线的 -y 会掉进位置参数，
+// `fix -y` 照样弹确认，`launch -y Antigravity` 更糟——应用名被吃成 -y。
+test("单横线短选项映射到长选项", () => {
+  const a = parseArgs(["fix", "-y"]);
+  assert.equal(a.flags.yes, true);
+  assert.deepEqual(a._, ["fix"]);
+
+  const b = parseArgs(["launch", "-y", "Antigravity"]);
+  assert.equal(b.flags.yes, true);
+  assert.deepEqual(b._, ["launch", "Antigravity"]);
+});
+
+test("-h / -v 映射 help / version", () => {
+  assert.equal(parseArgs(["-h"]).flags.help, true);
+  assert.equal(parseArgs(["-v"]).flags.version, true);
+});
+
+test("不认识的短选项当位置参数而不是静默吃掉", () => {
+  const a = parseArgs(["proxy", "-x"]);
+  assert.deepEqual(a._, ["proxy", "-x"]);
+});
+
+test("--no-session-env 是纯开关，不吃下一个参数", () => {
+  const a = parseArgs(["proxy", "--no-session-env", "--port", "8899"]);
+  assert.equal(a.flags["no-session-env"], true);
+  assert.equal(a.flags.port, "8899");
+});
+
+test("--config 是带值选项", () => {
+  const a = parseArgs(["fix", "--config", "/tmp/mihomo.yaml"]);
+  assert.equal(a.flags.config, "/tmp/mihomo.yaml");
+  assert.deepEqual(a._, ["fix"]);
+});

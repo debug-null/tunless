@@ -1,4 +1,5 @@
 import dgram from "node:dgram";
+import dns from "node:dns";
 
 export const FAKE_IP_PREFIX = "198.18.";
 
@@ -169,4 +170,40 @@ export async function classifyDomain(name, server, options = {}) {
   else if (kinds.every((k) => k === "fake")) kind = "fake";
 
   return { name, server, ok: true, ips: res.ips, kind };
+}
+
+/**
+ * 用系统解析器（mDNSResponder）解析 A 记录。
+ *
+ * 这是探测 fake-ip 的唯一正确通道：内网 DNS 永远不会回 198.18.x，
+ * 只有走系统路径 —— TUN 开着时被内核接管、没开时走真实 DNS ——
+ * 才能观察到内核是否还在发假地址。
+ */
+export async function resolve4System(name, timeout = 2500) {
+  let timer;
+  try {
+    const ips = await Promise.race([
+      dns.promises.resolve4(name),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("timeout")), timeout);
+      }),
+    ]);
+    return { ok: true, ips };
+  } catch (err) {
+    return { ok: false, error: err.code || err.message, ips: [] };
+  } finally {
+    // race 输了会留下定时器，拖着进程不退 —— 必须清掉
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * 内网 DNS 服务器活着吗？随便查一个名字，能收到**任何**响应就算活
+ * （NXDOMAIN 也算 —— 我们要的是「这个服务器在回话」，不是解析结果）。
+ * 不活着就趁早短路：逐个域名探测会在每个 3s 超时上空转。
+ */
+export async function probeServer(server, timeout = 1200) {
+  if (!server) return { ok: false, error: "没有内网 DNS 地址" };
+  const res = await queryA("tunless-probe.invalid", server, { timeout });
+  return res.ok ? { ok: true } : { ok: false, error: res.error ?? "timeout" };
 }

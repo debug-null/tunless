@@ -16,6 +16,8 @@ import {
   ipToInt,
   ipInCidr,
   ruleSuffixes,
+  learnSuffixes,
+  loadLearnedSuffixes,
 } from "../src/core/rules.js";
 
 test("域名规则默认按后缀匹配，+ 前缀会被去掉", () => {
@@ -87,4 +89,29 @@ test("IP 转整数对非法输入返回 null", () => {
   assert.equal(ipToInt("10.0.0.1"), 167772161);
   assert.equal(ipToInt("10.0.0"), null);
   assert.equal(ipToInt("10.0.0.999"), null);
+});
+
+// 学到的后缀集合只增不减：以前每次启动现场推导，同一个域名
+// 今天直连、明天可能就默默走了代理。
+test("learnSuffixes 持久化并只增不减", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tunless-suffix-"));
+  const file = path.join(dir, "suffixes.json");
+
+  const first = learnSuffixes(["17usoft.com", "17u.cn"], file);
+  assert.deepEqual([...first.all].sort(), ["17u.cn", "17usoft.com"]);
+  assert.equal(first.added.length, 2);
+
+  // 第二次只扫到一部分 —— 旧的不能丢
+  const second = learnSuffixes(["17usoft.com", "corp.elong.com"], file);
+  assert.equal(second.added.length, 1);
+  assert.deepEqual([...second.all].sort(), ["17u.cn", "17usoft.com", "corp.elong.com"]);
+  assert.deepEqual(loadLearnedSuffixes(file).sort(), ["17u.cn", "17usoft.com", "corp.elong.com"]);
+});
+
+test("loadLearnedSuffixes 对坏文件返回空数组", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tunless-suffix-"));
+  const file = path.join(dir, "suffixes.json");
+  fs.writeFileSync(file, "{ 坏 json");
+  assert.deepEqual(loadLearnedSuffixes(file), []);
+  assert.deepEqual(loadLearnedSuffixes(path.join(dir, "不存在.json")), []);
 });

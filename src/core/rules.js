@@ -131,6 +131,56 @@ export function totalRules(rules) {
   return RULE_KINDS.reduce((sum, kind) => sum + (rules?.[kind]?.length ?? 0), 0);
 }
 
+// ---- 自动学到的内网后缀 ----
+//
+// 以前后缀集是每次启动时现场推导的：今天扫到 10 个、明天 4 个，
+// 昨天还直连的域名可能今天就默默走了代理 —— 路由策略在用户看不见
+// 的地方抖动，这比「少一个域名」更难排查。
+//
+// 改成单调累积：每次扫描把新发现的后缀并入 suffixes.json，之后只在
+// 用户显式删除时缩小。
+
+export function suffixesFile() {
+  return path.join(dataDir(), "suffixes.json");
+}
+
+export function loadLearnedSuffixes(file = suffixesFile()) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    const list = Array.isArray(parsed?.suffixes) ? parsed.suffixes : [];
+    return [...new Set(list.map((v) => String(v).trim().toLowerCase()).filter(Boolean))].sort();
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 把新发现的后缀并入已学到的集合，返回 {all, added}。
+ * 只增不减 —— 用户想删走 rules 里的反向通道（删规则条目）。
+ */
+export function learnSuffixes(discovered, file = suffixesFile()) {
+  const known = loadLearnedSuffixes(file);
+  const fresh = (discovered ?? [])
+    .map((v) => String(v).trim().toLowerCase())
+    .filter(Boolean);
+  const all = [...new Set([...known, ...fresh])].sort();
+  const added = all.filter((v) => !known.includes(v));
+  if (added.length || !fs.existsSync(file)) {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, `${JSON.stringify({ suffixes: all }, null, 2)}\n`, "utf8");
+  }
+  return { all, added };
+}
+
+export function clearLearnedSuffixes(file = suffixesFile()) {
+  try {
+    fs.unlinkSync(file);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** 规则里的域名可以直接当内网后缀用 */
 export function ruleSuffixes(rules) {
   return [...new Set(rules?.domain ?? [])].sort();

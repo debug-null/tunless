@@ -59,9 +59,17 @@ export function labelForProcess(command) {
 export async function detectActiveClient() {
   try {
     const sys = await systemProxyState();
-    if (!sys?.httpEnabled || !sys.port) return null;
+    // 有些客户端只设 SOCKS 系统代理（sing-box / v2ray 常见），只看 HTTP 会漏。
+    const port = sys?.httpEnabled && sys.port
+      ? sys.port
+      : sys?.socksEnabled && sys.socksPort
+        ? sys.socksPort
+        : sys?.httpsEnabled && sys.httpsPort
+          ? sys.httpsPort
+          : null;
+    if (!port) return null;
     const rows = await listeningPorts();
-    const row = rows.find((r) => r.port === Number(sys.port));
+    const row = rows.find((r) => r.port === Number(port));
     if (!row) return null;
     const label = labelForProcess(row.process);
     if (!label) return null;
@@ -69,7 +77,7 @@ export async function detectActiveClient() {
     if (/wmsxwd|atlascore/i.test(row.process)) id = "wmsxwd";
     else if (/mihomo-party/i.test(row.process)) id = "generic-mihomo";
     else if (/clash-verge|verge-mihomo/i.test(row.process)) id = "clash-verge-rev";
-    return { id, label, port: Number(sys.port), process: row.process };
+    return { id, label, port: Number(port), process: row.process };
   } catch {
     return null;
   }
@@ -87,10 +95,11 @@ export async function detectClient() {
       maxBuffer: 16 * 1024 * 1024,
     });
     const lines = stdout.split("\n").filter(Boolean);
-    // 优先认真正的 GUI 客户端（/Applications/xxx.app），而不是 helper 或内核进程：
+    // 优先认真正的 GUI 客户端（xxx.app），而不是 helper 或内核进程：
     // Clash Verge 在跑的时候，它的 helper 和 party 的 helper 可能同时存在。
+    // 装在 ~/Applications 的也要认 —— 之前硬编码 /Applications 漏掉一片。
     const gui = lines.find(
-      (line) => /\/Applications\/.+\.app\//.test(line) && labelForProcess(line),
+      (line) => /\.app\/Contents\//.test(line) && labelForProcess(line),
     );
     const hit = gui ?? lines.find((line) => labelForProcess(line));
     if (hit) return { label: labelForProcess(hit), command: hit.trim() };
@@ -171,15 +180,19 @@ export async function systemProxyCandidates() {
   const sys = await systemProxyState();
   if (!sys) return [];
   const out = [];
-  const host = sys.host && sys.host !== "" ? sys.host : "127.0.0.1";
-  if (sys.httpEnabled && sys.port) {
+  const push = (enabled, host, port, tag) => {
+    if (!enabled || !port) return;
+    const h = host && host !== "" ? host : "127.0.0.1";
     out.push({
-      host: host === "127.0.0.1" || host === "localhost" ? "127.0.0.1" : host,
-      port: Number(sys.port),
+      host: h === "localhost" ? "127.0.0.1" : h,
+      port: Number(port),
       source: "system-proxy",
-      label: "系统代理",
+      label: `系统代理（${tag}）`,
     });
-  }
+  };
+  push(sys.httpEnabled, sys.host, sys.port, "HTTP");
+  push(sys.httpsEnabled, sys.httpsHost, sys.httpsPort, "HTTPS");
+  push(sys.socksEnabled, sys.socksHost, sys.socksPort, "SOCKS");
   return out;
 }
 
@@ -507,9 +520,12 @@ export async function detectPinnedDrift({
  */
 export async function detectControllerPorts({ timeoutMs = 900 } = {}) {
   const rows = await listeningPorts();
+  // 只探「长得像代理客户端的进程」的端口 —— 之前对本机所有监听端口
+  // 挨个发 /version，几十个端口全是噪音，还把扫描拖慢一个量级。
+  const suspects = rows.filter((row) => labelForProcess(row.process));
   const hits = [];
   await Promise.all(
-    rows.map(async (row) => {
+    suspects.map(async (row) => {
       const hit = await probeVersionEndpoint(row.host, row.port, timeoutMs);
       if (hit) hits.push({ ...row, ...hit });
     }),

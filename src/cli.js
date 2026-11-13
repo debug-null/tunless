@@ -6,7 +6,13 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { probeApi } from "./core/api.js";
-import { discoverAll, systemProxyState } from "./core/discover.js";
+import {
+  discoverAll,
+  systemProxyState,
+  resolveInternalDns,
+  parsePort,
+  parseSecret,
+} from "./core/discover.js";
 import {
   discoverUpstream,
   verifyUpstream,
@@ -20,13 +26,12 @@ import {
   parseUpstream,
   detectPinnedDrift,
 } from "./core/upstream.js";
-import { classifyDomain } from "./core/dns.js";
-import { dataDir } from "./core/paths.js";
+import { classifyDomain, probeServer, resolve4System } from "./core/dns.js";
+import { dataDir, writeRuntime, clearRuntime } from "./core/paths.js";
 import { scanAll } from "./core/scan.js";
 import { inspectProcesses, proxyAdvice } from "./core/proc.js";
 import {
   partitionByKind,
-  mergeHosts,
   mergeHostsValidated,
   buildDnsSection,
   renderDiff,
@@ -41,10 +46,18 @@ import {
   removeCustomTarget,
   loadCustomTargets,
 } from "./core/targets.js";
-import { loadRules, ruleSuffixes } from "./core/rules.js";
+import {
+  loadRules,
+  ruleSuffixes,
+  loadLearnedSuffixes,
+  learnSuffixes,
+} from "./core/rules.js";
 import {
   installService,
   uninstallService,
+  startService,
+  stopService,
+  restartService,
   serviceStatus,
   readServiceLog,
   setSessionProxyEnv,
@@ -136,11 +149,17 @@ const BOOLEAN_FLAGS = new Set([
   "print-env",
   "no-scan",
   "no-restart",
+  "no-session-env",
   "write-settings",
   "keyword",
   "cidr",
   "version",
 ]);
+
+// 单横线短选项 → 长选项。之前只认 --yes，`fix -y` 里 -y 会掉进
+// 位置参数，确认提示照样弹；更糟的是 `launch -y Antigravity`
+// 会把应用名吃成 -y。
+const SHORT_FLAGS = { y: "yes", h: "help", v: "version" };
 
 export function parseArgs(argv) {
   const args = { _: [], flags: {} };
@@ -160,6 +179,16 @@ export function parseArgs(argv) {
           args.flags[name] = true;
         }
       }
+    } else if (a.startsWith("-") && a.length > 1) {
+      for (const ch of a.slice(1)) {
+        const name = SHORT_FLAGS[ch];
+        if (!name) {
+          // 不认识的短选项当成位置参数，别静默吃掉
+          args._.push(a);
+          break;
+        }
+        args.flags[name] = true;
+      }
     } else {
       args._.push(a);
     }
@@ -172,7 +201,40 @@ function resolveAdapter(frontend) {
   return new GenericAdapter(frontend);
 }
 
-async function pickFrontend(flags) {
+/**
+ * --config <路径>：手递一份 mihomo 配置，绕开自动发现。
+ * help 和适配器报错文案里都写了这个参数，但之前没人真的读它。
+ */
+function frontendFromConfig(configPath) {
+  const file = path.resolve(String(configPath));
+  if (!fs.existsSync(file)) {
+    throw new Error(`--config 指定的文件不存在：${file}`);
+  }
+  const text = fs.readFileSync(file, "utf8");
+  const controller =
+    parsePort(text, "external-controller") ?? parsePort(text, "external-controller-tls");
+  return {
+    id: "generic-mihomo",
+    label: `手动指定（${path.basename(file)}）`,
+    home: path.dirname(file),
+    apiCandidates: [
+      ...(controller
+        ? [{ host: "127.0.0.1", port: controller, secret: parseSecret(text) }]
+        : []),
+      { host: "127.0.0.1", port: 9090, secret: "" },
+    ],
+    configFile: file,
+    configFiles: [file],
+    mixedPort: parsePort(text, "mixed-port"),
+    logDir: null,
+  };
+}
+
+async function pickFrontend(args) {
+  // 调用点传的是整个 args（{_, flags}），不是 flags 本身 ——
+  // 之前直接读 .frontend/.config，这两个参数从来就没有真的生效过。
+  const flags = args?.flags ?? args ?? {};
+  if (flags.config) return frontendFromConfig(flags.config);
   const frontends = discoverAll();
   const explicit = flags.frontend;
   if (explicit) {
@@ -324,18 +386,31 @@ async function probeDomains(hosts, internalDns, concurrency = 8) {
 }
 
 export async function cmdScan(args) {
-  const internalDns = args.flags["internal-dns"] || DEFAULT_INTERNAL_DNS;
+  const internalDns = await resolveInternalDns(args.flags["internal-dns"], DEFAULT_INTERNAL_DNS);
   const repoRoots = args.flags.repos
     ? String(args.flags.repos).split(",").map((s) => s.trim()).filter(Boolean)
     : [];
   const includeChrome = args.flags["no-chrome"] !== true;
 
-  const scanned = await scanAll({ repoRoots, includeChrome });
+  const frontend = await pickFrontend(args);
+  const scanned = await scanAll({ repoRoots, includeChrome, logDir: frontend?.logDir ?? null });
   const hosts = scanned.hosts.map((h) => h.host);
 
   say(head(`\n共扫描到 ${hosts.length} 个候选域名`));
   say(dim(`  来源：${scanned.sources.join("、") || "无"}`));
+  say(dim(`  内网 DNS：${internalDns}`));
   for (const note of scanned.notes) say(`  ${warn(note)}`);
+
+  // 内网 DNS 不通就先确认，而不是逐个域名各等 3 秒超时
+  const dnsAlive = await probeServer(internalDns);
+  if (!dnsAlive.ok) {
+    say(`\n  ${warn(`内网 DNS ${internalDns} 不可达（${dnsAlive.error}）`)}`);
+    say(dim("    不在公司网络 / VPN 断连时会这样。连上后重跑，或用 --internal-dns 指定"));
+    say(dim("    以下只列出扫描到的域名，不做内网/公网分类\n"));
+    for (const h of hosts.slice(0, 40)) say(`  ${dim(h)}`);
+    say();
+    return 0;
+  }
 
   const results = await probeDomains(hosts, internalDns);
   const { internal, fake, publicHosts, unresolved } = partitionByKind(results);
@@ -359,11 +434,10 @@ export async function cmdScan(args) {
 }
 
 export async function cmdDoctor(args) {
-  const internalDns = args.flags["internal-dns"] || DEFAULT_INTERNAL_DNS;
+  const internalDns = await resolveInternalDns(args.flags["internal-dns"], DEFAULT_INTERNAL_DNS);
   let exitCode = 0;
 
   say(head("\n── 环境 ──"));
-  const frontends = discoverAll();
   const frontend = await pickFrontend(args);
   // 只在「没认出 mihomo 系配置」时才用进程名兜底，
   // 否则会把 Verge 的 merge 文件能力说成别的客户端。
@@ -459,12 +533,40 @@ export async function cmdDoctor(args) {
     }
   }
 
+  // 两件重活并发跑：进程二进制探测 + 域名扫描分类。
+  // 之前串行，doctor 整体要 9 秒。
+  const [procs, domainScan] = await Promise.all([
+    inspectProcesses(),
+    (async () => {
+      const alive = await probeServer(internalDns);
+      if (!alive.ok) {
+        return { alive: false, error: alive.error, internal: [], suffixes: [] };
+      }
+      const repoRoots = args.flags.repos
+        ? String(args.flags.repos).split(",").map((s) => s.trim()).filter(Boolean)
+        : [];
+      const scanned = await scanAll({
+        repoRoots,
+        includeChrome: args.flags["no-chrome"] !== true,
+        logDir: frontend?.logDir ?? null,
+      });
+      const results = await probeDomains(scanned.hosts.map((h) => h.host), internalDns);
+      const { internal } = partitionByKind(results);
+      const suffixes = await validatedMerger(internalDns)(internal.map((r) => r.name));
+      return { alive: true, internal, suffixes };
+    })(),
+  ]);
+
   say(head("\n── 程序代理能力 ──"));
-  const procs = await inspectProcesses();
   if (!procs.length) {
     say(dim("  未发现相关进程"));
   }
-  for (const p of procs) {
+  // 只展示有结论的 + 前几个未知的 —— Electron 应用本来就查不出符号，
+  // 全列出来是几十行噪音。
+  const judged = procs.filter((p) => p.status !== "unknown");
+  const unknown = procs.filter((p) => p.status === "unknown");
+  const shown = [...judged, ...unknown.slice(0, 6)];
+  for (const p of shown) {
     const badge =
       p.status === "supported"
         ? ok("支持代理环境变量")
@@ -474,17 +576,23 @@ export async function cmdDoctor(args) {
     say(`  ${String(p.pid).padEnd(7)} ${p.comm.slice(0, 52).padEnd(52)} ${badge}`);
     if (p.status === "unsupported") say(dim(`      ${proxyAdvice(p)}`));
   }
+  if (procs.length > shown.length) {
+    say(dim(`  …… 还有 ${procs.length - shown.length} 个进程无法判定（Electron 应用读不到符号，属正常）`));
+  }
 
   // 「配置写了」不等于「现在真的在用」。这里只看能确凿观察到的连接，
   // 读不到就说读不到 —— 不拿环境变量推测定罪。
   say(head("\n── 进程实际代理 ──"));
   for (const app of APPS) {
     if (app.id === "codex") continue;
-    const pid = await networkPid(app);
-    if (!pid) {
+    // 「在不在跑」看主进程；「联不联网」看子进程 —— 分开判，
+    // 之前混在 networkPid 一个结果上，Cursor 被误报成「没在运行」。
+    const running = await mainPid(app);
+    if (!running) {
       say(`  ${app.name.padEnd(14)} ${dim("没在运行")}`);
       continue;
     }
+    const pid = await networkPid(app);
     const env = await processProxyEnv(pid);
     if (env?.hasProxy) {
       say(`  ${app.name.padEnd(14)} ${ok(env.httpsProxy)} ${dim(`(pid ${pid})`)}`);
@@ -502,30 +610,28 @@ export async function cmdDoctor(args) {
   say(dim("    export HTTPS_PROXY=http://127.0.0.1:8899"));
 
   say(head("\n── 内网域名 ──"));
-  const repoRoots = args.flags.repos
-    ? String(args.flags.repos).split(",").map((s) => s.trim()).filter(Boolean)
-    : [];
-  const scanned = await scanAll({ repoRoots, includeChrome: args.flags["no-chrome"] !== true });
-  const results = await probeDomains(scanned.hosts.map((h) => h.host), internalDns);
-  const { internal, fake } = partitionByKind(results);
+  if (!domainScan.alive) {
+    say(`  ${warn(`内网 DNS ${internalDns} 不可达（${domainScan.error}）`)}`);
+    say(dim("    跳过内网域名分类 —— 不在公司网络时这是正常现象"));
+  } else {
+    const { internal, suffixes } = domainScan;
+    say(`  ${info(`${internal.length} 个内网域名解析到私网地址`)}`);
 
-  say(`  ${info(`${internal.length} 个内网域名解析到私网地址`)}`);
-  say(`  ${info(`${fake.length} 个域名仍解析为假 IP`)}`);
-
-  if (api) {
-    const suffixes = await validatedMerger(internalDns)(internal.map((r) => r.name));
+    // 「还发不发假地址」要走系统解析器问 —— TUN 开着时内网 DNS 根本
+    // 看不到 198.18.x，之前的查法永远是 0，等于没查。
     if (suffixes.length) {
-      let missing = [];
-      for (const s of suffixes) {
-        const res = await classifyDomain(s, internalDns);
-        if (res.kind === "fake") missing.push(s);
-      }
+      const checks = await Promise.all(
+        suffixes.map(async (s) => ({ s, res: await resolve4System(s) })),
+      );
+      const missing = checks
+        .filter((c) => c.res.ips?.some((ip) => ip.startsWith("198.18.")))
+        .map((c) => c.s);
       if (missing.length) {
         exitCode = 1;
         say(`  ${bad(`${missing.length} 个后缀仍是假 IP — 请运行：tunless fix`)}`);
         for (const m of missing) say(dim(`    +.${m}`));
       } else {
-        say(`  ${ok("所有内网后缀均解析到私网地址")}`);
+        say(`  ${ok("内网后缀经系统解析均不是假 IP")}`);
       }
     }
   }
@@ -538,6 +644,10 @@ export async function cmdDoctor(args) {
 export async function collectInternalSuffixes(frontend, internalDns, { scan = true, repoRoots = [] } = {}) {
   const suffixes = new Set();
 
+  // 0. 历次扫描学到的 —— 集合只增不减。以前每次启动现场推导，
+  //    昨天直连的域名今天就可能默默走了代理。
+  for (const s of loadLearnedSuffixes()) suffixes.add(s);
+
   // 1. whatever the running client already routes to the internal resolver
   try {
     const adapter = resolveAdapter(frontend);
@@ -546,17 +656,17 @@ export async function collectInternalSuffixes(frontend, internalDns, { scan = tr
       const clean = String(key).replace(/^\+\./, "").replace(/^["']|["']$/g, "");
       if (clean) suffixes.add(clean);
     }
-    for (const entry of dns["fake-ip-filter"] ?? []) {
-      const clean = String(entry).replace(/^\+\./, "").replace(/^\*\./, "").replace(/^["']|["']$/g, "");
-      if (clean && clean.includes(".")) suffixes.add(clean);
-    }
+    // 注意：fake-ip-filter 不当内网后缀。那里面是「内核不要发假地址」
+    // 的名单，客户端默认配置里的 *.stun.* / ntp.org.cn 之类会被误当
+    // 内网域名 → 走内网 DNS → NXDOMAIN → 502。
   } catch {
     // no readable client config — fall back to the scan only
   }
 
   // 2. hosts we can observe resolving to private addresses right now
-  if (scan) {
-    const scanned = await scanAll({ repoRoots, includeChrome: false });
+  //    内网 DNS 不通就跳过 —— 否则每个候选域名都要等满一次超时。
+  if (scan && (await probeServer(internalDns)).ok) {
+    const scanned = await scanAll({ repoRoots, includeChrome: false, logDir: frontend?.logDir ?? null });
     const results = await probeDomains(scanned.hosts.map((h) => h.host), internalDns);
     const { internal } = partitionByKind(results);
     for (const suffix of await validatedMerger(internalDns)(internal.map((r) => r.name))) {
@@ -564,11 +674,13 @@ export async function collectInternalSuffixes(frontend, internalDns, { scan = tr
     }
   }
 
+  // 新发现落盘，下次启动直接用 —— 也是「只增不减」的另一半。
+  learnSuffixes([...suffixes]);
   return [...suffixes].sort();
 }
 
 export async function cmdProxy(args) {
-  const internalDns = args.flags["internal-dns"] || DEFAULT_INTERNAL_DNS;
+  const internalDns = await resolveInternalDns(args.flags["internal-dns"], DEFAULT_INTERNAL_DNS);
   const frontend = await pickFrontend(args);
   const httpPort = Number(args.flags.port || 8899);
   const socksPort = Number(args.flags["socks-port"] ?? 8898);
@@ -607,6 +719,7 @@ export async function cmdProxy(args) {
   say(head("\n── tunless proxy ──\n"));
   say(`  ${info(`上游代理：${upstream.host}:${upstream.port}`)} ${dim(`（${resolved.detail}）`)}`);
   say(`  ${info(`内网域名：${suffixes.length ? suffixes.join("、") : "未检测到"}`)}`);
+  say(`  ${info(`内网 DNS：${internalDns}`)}`);
   say(`  ${ok(`HTTP 代理 ：http://127.0.0.1:${httpPort}`)}`);
   if (socksPort) say(`  ${ok(`SOCKS5 代理：socks5://127.0.0.1:${socksPort}`)}`);
 
@@ -618,11 +731,23 @@ export async function cmdProxy(args) {
   if (noProxy) say(dim(`    export NO_PROXY=${noProxy}`));
   say(dim("    （小写变量名同样有效）"));
 
+  // --print-env 就该是纯打印：之前它还是会写登录会话变量，
+  // 一条「只是看看」的命令产生了副作用。
+  if (args.flags["print-env"] === true) {
+    say();
+    return 0;
+  }
+
   // 只打印 export 语句是不够的：用户从 Dock 点开应用时根本没有这个环境。
   // 把变量写进 launchd 登录会话，所有新启动的 GUI 应用都会带上。
-  // 同时认 --session-env=false 与 --no-session-env 两种写法：
-  // 后者是 service install 内部用来关掉它的。
-  if (args.flags["session-env"] !== false && args.flags["no-session-env"] !== true) {
+  // 认 --session-env=false / --session-env=0 / --no-session-env 三种写法；
+  // 之前只认布尔 false，传字符串 "false" 会失效（真值判断）。
+  const sessionEnvDisabled =
+    args.flags["session-env"] === false ||
+    args.flags["session-env"] === "false" ||
+    args.flags["session-env"] === "0" ||
+    args.flags["no-session-env"] === true;
+  if (!sessionEnvDisabled) {
     const sessionEnv = {
       HTTPS_PROXY: `http://127.0.0.1:${httpPort}`,
       HTTP_PROXY: `http://127.0.0.1:${httpPort}`,
@@ -645,12 +770,18 @@ export async function cmdProxy(args) {
     }
   }
 
-  if (args.flags["print-env"] === true) {
-    say();
-    return 0;
-  }
-
-  const log = (line) => say(dim(`    ${line}`));
+  // 日志去重：同一个 host:port -> 路由 的判定一分钟内只记一条。
+  // 之前每条 CONNECT 都写，launchd 几天就把 proxy.log 灌到几万行，
+  // 而且 `service logs` 只能看末尾 40 行 —— 全是噪音，没有历史。
+  const seenRoutes = new Map();
+  const log = (line) => {
+    const now = Date.now();
+    const last = seenRoutes.get(line) ?? 0;
+    if (now - last < 60_000) return;
+    seenRoutes.set(line, now);
+    if (seenRoutes.size > 4096) seenRoutes.clear();
+    say(dim(`    ${line}`));
+  };
   const httpServer = new HttpProxyServer({
     port: httpPort,
     upstream,
@@ -676,36 +807,53 @@ export async function cmdProxy(args) {
 
   say(head("\n  正在监听 — 按 Ctrl+C 停止。\n"));
 
+  // 把「正在生效的配置」落盘：TUI / doctor 展示的分流域名应该
+  // 以运行中的服务实际加载的这份为准，不是刚算出来的那份。
+  writeRuntime({
+    httpPort,
+    socksPort,
+    upstream,
+    suffixes,
+    internalDns,
+  });
+
   // 上游热更新。转发服务是常驻的，用户随时可能换客户端
   // （Clash Verge → wmsxwd），端口也会跟着变。抱着旧端口不放 =
   // 流量悄悄走回旧客户端，而且界面上完全看不出来。
-  const refresh = setInterval(async () => {
-    try {
-      const again = await resolveUpstream({ flags: {} });
-      if (!again.upstream) return;
-      if (
-        again.upstream.host === upstream.host &&
-        again.upstream.port === upstream.port
-      ) {
-        return;
-      }
-      upstream = {
-        host: again.upstream.host,
-        port: again.upstream.port,
-        protocols: again.upstream.protocols ?? ["http", "socks5"],
-      };
-      httpServer.upstream = upstream;
-      if (socksServer) socksServer.upstream = upstream;
-      log(`上游已切换到 ${upstream.host}:${upstream.port}（${again.detail}）`);
-    } catch {
-      // 探测失败就保持现状，别把正在用的连接弄断
-    }
-  }, 30_000);
-  refresh.unref?.();
+  //
+  // 但 --upstream 显式指定时不刷：用户已经点名要这个端口，
+  // 「自动发现换了别的」不应当覆盖用户的选择。
+  const refresh = args.flags.upstream
+    ? null
+    : setInterval(async () => {
+        try {
+          const again = await resolveUpstream({ flags: {} });
+          if (!again.upstream) return;
+          if (
+            again.upstream.host === upstream.host &&
+            again.upstream.port === upstream.port
+          ) {
+            return;
+          }
+          upstream = {
+            host: again.upstream.host,
+            port: again.upstream.port,
+            protocols: again.upstream.protocols ?? ["http", "socks5"],
+          };
+          httpServer.upstream = upstream;
+          if (socksServer) socksServer.upstream = upstream;
+          log(`上游已切换到 ${upstream.host}:${upstream.port}（${again.detail}）`);
+          writeRuntime({ httpPort, socksPort, upstream, suffixes, internalDns });
+        } catch {
+          // 探测失败就保持现状，别把正在用的连接弄断
+        }
+      }, 30_000);
+  refresh?.unref?.();
 
   const shutdown = async () => {
     say(dim("\n  正在停止…"));
-    clearInterval(refresh);
+    if (refresh) clearInterval(refresh);
+    clearRuntime();
     await httpServer.stop();
     if (socksServer) await socksServer.stop();
     process.exit(0);
@@ -723,11 +871,10 @@ export async function cmdLaunch(args) {
   const app = args.flags.app || args._[1] || "Antigravity";
   const httpPort = Number(args.flags.port || 8899);
   const socksPort = Number(args.flags["socks-port"] ?? 8898);
-  const noProxy = args.flags["no-proxy"] || "";
 
   // Resolve the internal domains the same way the sidecar does, so the
   // NO_PROXY list stays consistent with the routing rules.
-  const internalDns = args.flags["internal-dns"] || DEFAULT_INTERNAL_DNS;
+  const internalDns = await resolveInternalDns(args.flags["internal-dns"], DEFAULT_INTERNAL_DNS);
   const frontend = await pickFrontend(args);
   const repoRoots = args.flags.repos
     ? String(args.flags.repos).split(",").map((s) => s.trim()).filter(Boolean)
@@ -837,15 +984,15 @@ export async function cmdLaunch(args) {
   const target2 = findApp(app);
   if (target2 && target2.id !== "codex") {
     // 先确认它真的起来了。open -a 返回只代表「系统收到请求」。
-    const mainPid = await waitForMainPid(target2);
-    if (!mainPid) {
+    const observedPid = await waitForMainPid(target2);
+    if (!observedPid) {
       say(`  ${bad(`${app.replace(/\.app$/, "")} 15 秒内没有启动起来`)}`);
       say(dim("    可以在 Finder 里双击试试；若也起不来，说明是应用本身的问题\n"));
       return 1;
     }
-    if (beforePid && mainPid === beforePid) {
+    if (beforePid && observedPid === beforePid) {
       // 同一个 pid 说明旧实例没退，环境变量还是旧的
-      say(`  ${warn(`进程没有更换（pid ${mainPid}），环境变量可能还是旧的`)}`);
+      say(`  ${warn(`进程没有更换（pid ${observedPid}），环境变量可能还是旧的`)}`);
       say(dim("    请手动 Cmd+Q 完全退出后重试\n"));
       return 1;
     }
@@ -1108,7 +1255,7 @@ export async function cmdCursor(args) {
 
   if (args.flags["no-restart"] === true) return 0;
 
-  const internalDns = args.flags["internal-dns"] || DEFAULT_INTERNAL_DNS;
+  const internalDns = await resolveInternalDns(args.flags["internal-dns"], DEFAULT_INTERNAL_DNS);
   const frontend = await pickFrontend(args);
   const suffixes = [
     ...new Set([
@@ -1175,9 +1322,21 @@ export async function cmdUpstream(args) {
     say(`\n  ${ok(`已指定上游代理 ${parsed.host}:${parsed.port}`)}`);
     if (protocols.length) say(dim(`    识别为 ${protocols.join(" + ")}`));
     say(dim(`    保存于 ${file}`));
-    say(head("\n  让转发服务用上新端口："));
-    say(dim("    tunless service uninstall && tunless service install"));
-    say(dim("    或：tunless upstream clear 恢复自动探测\n"));
+    // 服务在跑就直接重启让新上游生效 —— 之前让用户自己 uninstall &&
+    // install，两步操作里 uninstall 还会把登录会话变量清掉。
+    const svc = await serviceStatus();
+    if (svc.running) {
+      say(dim("\n    正在重启转发服务让新上游生效…"));
+      const st = await restartService();
+      say(
+        st.running
+          ? `  ${ok("转发服务已重启，新上游已生效")}`
+          : `  ${warn("转发服务没有起来，tunless service logs 看原因")}`,
+      );
+    } else {
+      say(dim("\n    转发服务没在运行，下次启动就会用上新端口"));
+    }
+    say(dim("    恢复自动探测：tunless upstream clear\n"));
     return 0;
   }
 
@@ -1381,7 +1540,14 @@ export async function cmdService(args) {
       env.ALL_PROXY = `socks5://127.0.0.1:${socksPort}`;
       env.all_proxy = env.ALL_PROXY;
     }
-    const noProxy = ["127.0.0.1", "localhost", "::1", ".local", ...ruleSuffixes(loadRules())].join(",");
+    const noProxy = [
+      "127.0.0.1",
+      "localhost",
+      "::1",
+      ".local",
+      ...ruleSuffixes(loadRules()),
+      ...loadLearnedSuffixes(),
+    ].join(",");
     env.NO_PROXY = noProxy;
     env.no_proxy = noProxy;
     return env;
@@ -1412,14 +1578,55 @@ export async function cmdService(args) {
     const status = await serviceStatus();
     say(`  ${status.running ? ok(`运行中（pid ${status.pid}）`) : warn("尚未运行")}`);
     say(dim(`    日志：~/.tunless/proxy.log`));
-    say(dim(`    停止：tunless service uninstall\n`));
+    say(dim(`    停止：tunless service stop；卸载：tunless service uninstall\n`));
     return status.running ? 0 : 1;
   }
 
-  if (action === "uninstall" || action === "stop") {
+  if (action === "uninstall") {
     await uninstallService();
     say(`\n  ${ok("转发服务已移除")}\n`);
     return 0;
+  }
+
+  // stop 是「停掉但保留安装」，不是卸载 —— 之前把它映射成
+  // uninstallService，停一次就把 plist 删了，想再启动必须重装。
+  if (action === "stop") {
+    if (!(await serviceStatus()).installed) {
+      say(`  ${warn("转发服务没有安装，没什么可停的")}`);
+      return 1;
+    }
+    await stopService();
+    say(`\n  ${ok("转发服务已停止")} ${dim("（登录会话变量已清除，避免应用指向死端口）")}`);
+    say(dim("    再启动：tunless service start\n"));
+    return 0;
+  }
+
+  if (action === "start") {
+    if (!(await serviceStatus()).installed) {
+      say(`  ${bad("转发服务还没安装，先 tunless service install")}`);
+      return 1;
+    }
+    const st = await startService();
+    say(
+      st.running
+        ? `\n  ${ok(`转发服务已启动（pid ${st.pid}）`)}\n`
+        : `\n  ${bad("服务没有起来 — tunless service logs 看原因")}\n`,
+    );
+    return st.running ? 0 : 1;
+  }
+
+  if (action === "restart") {
+    if (!(await serviceStatus()).installed) {
+      say(`  ${bad("转发服务还没安装，先 tunless service install")}`);
+      return 1;
+    }
+    const st = await restartService();
+    say(
+      st.running
+        ? `\n  ${ok(`转发服务已重启（pid ${st.pid}）`)}\n`
+        : `\n  ${bad("重启失败 — tunless service logs 看原因")}\n`,
+    );
+    return st.running ? 0 : 1;
   }
 
   if (action === "logs") {
@@ -1435,13 +1642,15 @@ export async function cmdService(args) {
     say(`  ${status.running ? ok(`运行中（pid ${status.pid}）`) : bad("已安装但未运行")}`);
   }
   say(dim("\n  tunless service install     # 开机自启，崩溃自动拉起"));
+  say(dim("  tunless service start|stop|restart   # 启动 / 停止 / 重启"));
   say(dim("  tunless service uninstall   # 移除它"));
   say(dim("  tunless service logs\n"));
-  return status.installed && status.running ? 0 : 0;
+  // 没在跑就是 1 —— 脚本里 `tunless service status && …` 才有意义
+  return status.installed && status.running ? 0 : 1;
 }
 
 export async function cmdFix(args) {
-  const internalDns = args.flags["internal-dns"] || DEFAULT_INTERNAL_DNS;
+  const internalDns = await resolveInternalDns(args.flags["internal-dns"], DEFAULT_INTERNAL_DNS);
   const assumeYes = args.flags.yes === true || args.flags.y === true;
   const frontend = await pickFrontend(args);
   const adapter = resolveAdapter(frontend);
@@ -1469,14 +1678,25 @@ export async function cmdFix(args) {
   say(`  ${ok(`内核接口：${api.descriptor}`)}`);
   say(`  ${info(`目标文件：${targetFile}`)}`);
 
+  // 内网 DNS 不通就没法分类，fix 的整个前提不成立 —— 趁早说清楚，
+  // 而不是扫完几百个域名、每个都等满超时后报「没有内网域名」。
+  const dnsAlive = await probeServer(internalDns);
+  if (!dnsAlive.ok) {
+    say(`\n  ${bad(`内网 DNS ${internalDns} 不可达（${dnsAlive.error}）`)}`);
+    say(dim("    不在公司网络时没法判断哪些是内网域名，本次无法修复"));
+    say(dim("    连上公司网络 / VPN 后重跑，或用 --internal-dns 指定\n"));
+    return 1;
+  }
+
   const repoRoots = args.flags.repos
     ? String(args.flags.repos).split(",").map((s) => s.trim()).filter(Boolean)
     : [];
-  const scanned = await scanAll({ repoRoots, includeChrome: args.flags["no-chrome"] !== true });
+  const scanned = await scanAll({ repoRoots, includeChrome: args.flags["no-chrome"] !== true, logDir: frontend?.logDir ?? null });
   say(`  ${info(`扫描到 ${scanned.hosts.length} 个候选域名`)}`);
 
   const results = await probeDomains(scanned.hosts.map((h) => h.host), internalDns);
   const { internal, fake } = partitionByKind(results);
+  void fake;
 
   if (!internal.length) {
     say(`  ${warn("未检测到内网域名 — 无需修复")}`);
@@ -1538,7 +1758,16 @@ export async function cmdFix(args) {
   say(`  ${ok("配置已写入")}`);
 
   say(`  ${info(adapter.id === "clash-verge-rev" ? "正在重启 Clash Verge…" : "正在重载内核…")}`);
-  await adapter.reload(api);
+  // 重载失败必须回滚 —— 之前异常直接抛上去，文件改了、备份留了，
+  // 用户只看到一句裸错误，配置停留在半生效状态。
+  try {
+    await adapter.reload(api);
+  } catch (err) {
+    say(`  ${bad(`重载失败：${err.message}`)}`);
+    fs.copyFileSync(backupFile, targetFile);
+    say(`  ${warn("已从备份回滚")}\n`);
+    return 1;
+  }
   await new Promise((r) => setTimeout(r, adapter.id === "clash-verge-rev" ? 9000 : 2000));
 
   const verify = await verifyFix(
@@ -1549,6 +1778,7 @@ export async function cmdFix(args) {
   );
   if (verify.ok) {
     say(`  ${ok("校验通过 — 内网域名均解析到私网地址")}`);
+    if (verify.warning) say(`  ${warn(verify.warning)}`);
     const checks = await Promise.all(
       internal.slice(0, 5).map((r) => httpCheck(r.name)),
     );
@@ -1586,27 +1816,41 @@ async function verifyFix(hosts, suffixes, internalDns, api) {
     }
   }
 
-  // The collapsed suffix must at least resolve for real (never fake-ip),
-  // otherwise the core is still handing out synthetic addresses.
-  for (const suffix of suffixes) {
-    const res = await classifyDomain(suffix, internalDns);
-    if (res.kind === "fake") {
-      return { ok: false, reason: `core still returns fake-ip for ${suffix}` };
-    }
-  }
-
-  if (api) {
-    try {
-      const answers = await api.dnsAnswers(hosts[0] ?? suffixes[0] ?? "localhost");
-      if (answers.some((ip) => ip.startsWith("198.18."))) {
-        return { ok: false, reason: `core still returns fake-ip for ${hosts[0]}` };
+  // fake-ip 只能走「内核自己 / 系统解析器」这条通道验证 —— 内网 DNS
+  // 永远不会回 198.18.x，之前拿它查等于没查，校验形同虚设。
+  const resolveCore = api
+    ? async (name) => {
+        try {
+          return await api.dnsAnswers(name);
+        } catch {
+          return null;
+        }
       }
-    } catch {
-      // core may still be restarting; the DNS checks above are the primary signal
+    : async (name) => {
+        const res = await resolve4System(name);
+        return res.ok ? res.ips : null;
+      };
+
+  let inconclusive = 0;
+  const names = [...new Set([...suffixes, ...hosts.slice(0, 10)])];
+  for (const name of names) {
+    const ips = await resolveCore(name);
+    if (ips === null) {
+      inconclusive += 1;
+      continue;
+    }
+    if (ips.some((ip) => ip.startsWith("198.18."))) {
+      return { ok: false, reason: `内核仍在给 ${name} 回假地址（fake-ip-filter 没生效）` };
     }
   }
 
-  return { ok: true };
+  // 全部查不到不代表通过 —— 内核可能还在重启。如实说「没验完」，
+  // 而不是假装校验通过。
+  const warning =
+    inconclusive > 0
+      ? `${inconclusive} 个域名没能向${api ? "内核" : "系统解析器"}核实（可能还在重启），请稍后观察`
+      : null;
+  return { ok: true, warning };
 }
 
 function httpCheck(host) {
@@ -1647,7 +1891,7 @@ ${head("用法")}
   tunless launch [应用]       带代理环境重启某个应用（支持 Antigravity / Cursor / Codex）
   tunless cursor              给 Cursor 配好代理并带代理重启（专治模型连不上）
   tunless rules [操作]        add | remove | list — 手动补充内网域名/关键词/IP 段
-  tunless service <操作>      install | uninstall | status | logs
+  tunless service <操作>      install | start | stop | restart | status | logs | uninstall
   tunless upstream [操作]     status | set <host:port> | clear — 指定上游代理
   tunless test [应用]         按该应用实际会连的域名测外网
   tunless targets [操作]      add | remove | list — 自定义测试目标
@@ -1655,7 +1899,7 @@ ${head("用法")}
   tunless env                查看写进登录会话的代理变量（clear 撤销）
 
 ${head("选项")}
-  --internal-dns <ip>   内网 DNS 服务器（默认 ${DEFAULT_INTERNAL_DNS}）
+  --internal-dns <ip>   内网 DNS 服务器（默认自动发现，兜底 ${DEFAULT_INTERNAL_DNS}）
   --repos <路径>        逗号分隔的仓库根目录，用于扫描域名
   --no-chrome           跳过 Chrome 历史记录（需要完全磁盘访问权限）
   --frontend <id>       指定前端：clash-verge-rev | generic-mihomo
@@ -1710,7 +1954,7 @@ export async function main(argv) {
       const { renderStaticSummary } = await import("./tui/app.js");
       console.log(
         await renderStaticSummary({
-          internalDns: args.flags["internal-dns"] || DEFAULT_INTERNAL_DNS,
+          internalDns: args.flags["internal-dns"] ?? null,
           repoRoots: args.flags.repos
             ? String(args.flags.repos).split(",").map((s) => s.trim()).filter(Boolean)
             : [],
@@ -1721,7 +1965,7 @@ export async function main(argv) {
     }
     const { runTui } = await import("./tui/app.js");
     return await runTui({
-      internalDns: args.flags["internal-dns"] || DEFAULT_INTERNAL_DNS,
+      internalDns: args.flags["internal-dns"] ?? null,
       repoRoots: args.flags.repos
         ? String(args.flags.repos).split(",").map((s) => s.trim()).filter(Boolean)
         : [],

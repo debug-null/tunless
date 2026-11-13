@@ -7,7 +7,7 @@
 // 主题：启动时用 OSC 11 询问终端背景色，按亮暗切换配色；
 // 终端不支持 Unicode 时符号与边框降级成 ASCII。
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { render, renderToString, Box, Text, useApp, useInput, useStdout } from "ink";
 import { h, ThemeProvider, useTheme } from "./ui.js";
 import { getTheme, detectUnicode } from "./theme.js";
@@ -38,7 +38,7 @@ import {
 import { addRule, removeRule, saveRules, loadRules, RULE_KINDS } from "../core/rules.js";
 import { markSeen } from "./first-run.js";
 import { collectState, emptyState } from "./state.js";
-import { startService, stopService } from "../core/launchd.js";
+import { startService, stopService, restartService } from "../core/launchd.js";
 import { checkTargets } from "../core/reach.js";
 import { resolveTargets, parseTarget, addCustomTarget } from "../core/targets.js";
 import {
@@ -108,21 +108,24 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       setLive(null);
       return null;
     }
+    // 判定的基准是转发服务实际监听的端口，不是写死的 8899 ——
+    // 用户自定义端口时，按 8899 判会永远报「没走代理」。
+    const tunlessPort = state.sidecar?.httpPort ?? 8899;
     try {
       const conn = await appProxyPorts(target);
       // 光有连接还不够：得看联网子进程的环境里到底有没有代理。
       // 没有的话它会去直连真实 IP，报 `dial tcp … i/o timeout`，
       // 而界面还显示「已走 8899」，完全是误导。
       const netPid = await networkPid(target);
-      const env = await processProxyEnv(netPid);
-      const next = { ...conn, verdict: proxyVerdict(conn), netPid, env };
+      const env = await processProxyEnv(netPid, tunlessPort);
+      const next = { ...conn, verdict: proxyVerdict(conn, tunlessPort), netPid, env };
       setLive(next);
       return next;
     } catch {
       setLive(null);
       return null;
     }
-  }, [appId]);
+  }, [appId, state.sidecar?.httpPort]);
 
   const refresh = useCallback(async () => {
     setBusy(true);
@@ -140,11 +143,15 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       setState(next);
       await refreshLive();
       log(`状态已更新（内网域名 ${next.internalDomains.length} 个）`, "ok");
+      setBusy(false);
+      setProgress("");
+      return next;
     } catch (err) {
       log(`刷新失败：${err.message}`, "bad");
+      setBusy(false);
+      setProgress("");
+      return null;
     }
-    setBusy(false);
-    setProgress("");
   }, [internalDns, repoRoots, includeChrome, log, refreshLive]);
 
   const runFix = useCallback(async () => {
@@ -335,17 +342,6 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
             ? `${app.name} 已带代理启动（pid ${launched.pid}）`
             : `${app.name} 已带代理启动（pid ${launched.pid}），并写入代理配置`;
       }
-      // Codex 的「只给我环境变量」：打印出来，不写文件
-      if (actionId === "env" && (app.id === "codex" || app.name === "Codex")) {
-        const envLines = [
-          `export HTTPS_PROXY=http://127.0.0.1:8899`,
-          `export HTTP_PROXY=http://127.0.0.1:8899`,
-          `export NO_PROXY=localhost,127.0.0.1,::1,.local`,
-        ];
-        setHint(`复制到你的 shell：${envLines.join("  ")}`);
-        log(`Codex 环境变量（注意：.env 会覆盖它们，可能需要先清空 .env）`, "warn");
-        return "已给出环境变量（Codex 仍可能读 .env 覆盖）";
-      }
 
       if (actionId === "settings") {
         const { configureCursor, configureCodex, setQuiet } = await import("../cli.js");
@@ -389,9 +385,9 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
    * 第 3 步：按这个工具**自己会连的域名**测，而不是固定测 github。
    * Antigravity 报的是 oauth2.googleapis.com 超时，测 github 通不通没有意义。
    */
-  const runReach = useCallback(async () => {
+  const runReach = useCallback(async (forApp = null) => {
     setExecuting("正在实测外网…");
-    const targets = resolveTargets(appId ?? appName);
+    const targets = resolveTargets(forApp ?? appId ?? appName);
     const result = await checkTargets({ port: state.sidecar.httpPort, targets });
     setReach(result);
     setExecuting(null);
@@ -508,17 +504,57 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     [adoptUpstream],
   );
 
-  // 首次进入自动采集一次。
+  // 初始化只该跑一次。但 refresh 的身份跟着 refreshLive → appId 变，
+  // 依赖它写 [refresh] 等于「每次选完应用再全量采集一遍」——
+  // 把回调放进 ref，挂载效果只认 ref。
+  const appIdRef = useRef(null);
+  const latest = useRef({});
   useEffect(() => {
-    refresh();
+    appIdRef.current = appId;
+    latest.current = { refresh, runReach, refreshLive, log };
+  });
+
+  // 首次进入自动采集一次。采集完如果一切已就绪（服务在跑、上游已定、
+  // 有应用真的在走代理），直接落到结果页，不用一步步回车 —
+  // 想重新走向导在结果页回车就行。
+  useEffect(() => {
+    Promise.resolve(latest.current.refresh?.()).then((next) => {
+      // 采集要好几秒，用户可能已经先手选了工具 —— 别把人拽走。
+      if (!next || appIdRef.current) return;
+      const readyApp = (next.apps ?? []).find(
+        (a) => a.installed && a.proxied === "ok",
+      );
+      if (!next.sidecar?.running || !next.upstream?.chosen || !readyApp) return;
+      setAppId(readyApp.id);
+      setAppName(readyApp.name);
+      setDone(true);
+      latest.current.log?.(`${readyApp.name} 已在走代理，一切就绪 — 回车可重回向导`, "ok");
+      latest.current.refreshLive?.(readyApp.id);
+      latest.current.runReach?.(readyApp.id);
+    });
     markSeen();
-  }, [refresh]);
+  }, []);
 
   /** 规则列表（供删除使用） */
   const flatRules = useCallback(() => {
     const rules = state.rules ?? { domain: [], keyword: [], cidr: [] };
     return RULE_KINDS.flatMap((kind) => (rules[kind] ?? []).map((value) => ({ kind, value })));
   }, [state.rules]);
+
+  /**
+   * 规则变了，跑着的转发服务还在用旧路由 —— 让它重启立刻生效，
+   * 而不是提示用户自己「按 S 两次」。
+   */
+  const restartSidecarForRules = useCallback(async () => {
+    if (!state.sidecar?.running) return;
+    try {
+      const st = await restartService();
+      log(st.running ? "转发服务已重启，规则已生效" : "转发服务没起来，按 S 手动启动",
+        st.running ? "ok" : "warn");
+    } catch (err) {
+      log(`重启转发服务失败：${err.message}`, "warn");
+    }
+  }, [state.sidecar?.running, log]);
 
   const saveDraft = useCallback(() => {
     const value = draft.trim();
@@ -537,16 +573,19 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       );
       setHint(
         added
-          ? `已保存 ${rule.value} · 重启转发服务后生效（按 S 两次）`
+          ? state.sidecar?.running
+            ? `已保存 ${rule.value} · 正在重启转发服务让它生效`
+            : `已保存 ${rule.value} · 下次启动转发服务时生效`
           : `${rule.value} 已经在规则里了`,
       );
+      if (added) restartSidecarForRules();
     } catch (err) {
       setHint(`保存失败：${err.message}`);
       return;
     }
     setEditing(null);
     setDraft("");
-  }, [draft, editing, log]);
+  }, [draft, editing, log, state.sidecar?.running, restartSidecarForRules]);
 
   const deleteRule = useCallback(() => {
     const list = flatRules();
@@ -562,10 +601,11 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       log(removed ? `已删除规则：${target.value}` : `没有这条规则：${target.value}`, removed ? "warn" : "bad");
       setHint(removed ? `已删除 ${target.value}` : `没有找到 ${target.value}`);
       setRuleIndex(0);
+      if (removed) restartSidecarForRules();
     } catch (err) {
       setHint(`删除失败：${err.message}`);
     }
-  }, [flatRules, ruleIndex, log]);
+  }, [flatRules, ruleIndex, log, restartSidecarForRules]);
 
   useInput((input, key) => {
     // 输入自定义测试目标
@@ -696,6 +736,9 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         }
         setAppName(app.name);
         setAppId(app.id);
+        // live 连接探测按 appId 走 —— 换工具了就重看一眼，别拿上一个
+        // 应用的连接状态说事。
+        refreshLive(app.id);
         // 列表已经按「这个应用能不能用」过滤过了，
         // 第一项就是能用的那种方式，光标落在它上面。
         setActionIndex(0);
@@ -946,6 +989,19 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
                 : "h 看用法 · a 手写内网域名 · r 刷新 · q 退出"),
   );
 
+  // 最近几条事件：重启服务、写规则、报错原因这些本来只存在于
+  // log() 调用的信息 —— 之前 events 收集了却从不渲染，
+  // 用户只能看到一条一闪而过的 hint。
+  const KIND_COLOR = { ok: theme.colors.ok, warn: theme.colors.warn, bad: theme.colors.bad };
+  const eventLines = events.slice(-3).map((e) =>
+    h(
+      Text,
+      { key: `${e.time}-${e.text}` },
+      h(Text, { dimColor: true }, `  ${e.time} `),
+      h(Text, { color: KIND_COLOR[e.kind] ?? theme.colors.text, dimColor: e.kind === "info" }, e.text),
+    ),
+  );
+
   return h(
     Box,
     { flexDirection: "column", height: rows },
@@ -965,7 +1021,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       progress: busy ? progress : null,
       updatedAt: state.updatedAt,
     }),
-    h(Box, { flexDirection: "column" }, help, h(Text, { dimColor: true }, " ")),
+    h(Box, { flexDirection: "column" }, ...eventLines, help, h(Text, { dimColor: true }, " ")),
   );
 }
 

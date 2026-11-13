@@ -12,7 +12,10 @@ import {
   totalRules,
   rulesFile,
   RULE_KINDS,
+  loadLearnedSuffixes,
+  clearLearnedSuffixes,
 } from "./core/rules.js";
+import { serviceStatus, restartService } from "./core/launchd.js";
 
 const HEAD = "\n── tunless 内网规则 ──\n";
 
@@ -48,12 +51,38 @@ export async function cmdRules(args, ctx = {}) {
     say(`  规则文件：${dim(rulesFile())}`);
     say(`  共 ${totalRules(rules)} 条\n`);
     say(renderRules(rules));
+    const learned = loadLearnedSuffixes();
+    if (learned.length) {
+      say(`\n  扫描学到的内网后缀（${learned.length}，随扫描自动累积）：`);
+      for (const s of learned) say(`    ${s}`);
+      say(dim("    想清空重来：tunless rules reset-learned"));
+    }
     say("\n  这些规则会让匹配的域名直连（不经过代理），转发服务重启后生效：");
-    say(dim("    tunless service uninstall && tunless service install"));
+    say(dim("    tunless service restart"));
     say("  加一条：");
     say(dim("    tunless rules add matrix.17usoft.com"));
     say(dim("    tunless rules add jira --keyword"));
     say(dim("    tunless rules add 10.0.0.0/8"));
+    return 0;
+  }
+
+  // 学到的后缀是「只增不减」的 —— 换网络后旧后缀可能已经不再属于内网，
+  // 留一条让用户清空重扫的路，不然错误后缀会一直把域名导去直连。
+  if (action === "reset-learned") {
+    const learned = loadLearnedSuffixes();
+    clearLearnedSuffixes();
+    say(`\n  ${ok(`已清空 ${learned.length} 条扫描学到的后缀`)}`);
+    say(dim("    下次运行 tunless proxy / fix 时会重新扫描\n"));
+    const svc = await serviceStatus();
+    if (svc.running) {
+      say(dim("    正在重启转发服务…"));
+      const st = await restartService();
+      say(
+        st.running
+          ? `  ${ok("转发服务已重启")}\n`
+          : `  ${warn("转发服务没有起来，tunless service logs 看原因")}\n`,
+      );
+    }
     return 0;
   }
 
@@ -86,13 +115,26 @@ export async function cmdRules(args, ctx = {}) {
     }
     saveRules(rules);
     say(`\n  ${info(`规则文件：${rulesFile()}`)}`);
-    say(`  ${dim("重启转发服务后生效：tunless service uninstall && tunless service install")}\n`);
+    // 服务在跑就直接重启让规则生效 —— 之前让用户自己 uninstall &&
+    // install，不但麻烦，uninstall 还会顺手清掉登录会话变量。
+    const svc = await serviceStatus();
+    if (svc.running) {
+      say(dim("    正在重启转发服务让规则生效…"));
+      const st = await restartService();
+      say(
+        st.running
+          ? `  ${ok("转发服务已重启，规则已生效")}\n`
+          : `  ${warn("转发服务没有起来，tunless service logs 看原因")}\n`,
+      );
+    } else {
+      say(dim("    转发服务没在运行，下次启动就会用上\n"));
+    }
     return 0;
   }
 
   say(HEAD);
   say(`  未知操作：${action}`);
-  say(dim("  可用：list | add <值> | remove <值>"));
+  say(dim("  可用：list | add <值> | remove <值> | reset-learned"));
   say(dim("  加关键词用 --keyword，加网段直接写 10.0.0.0/8 即可自动识别"));
   return 1;
 }
