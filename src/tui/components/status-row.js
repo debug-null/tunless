@@ -16,11 +16,11 @@ export function StatusRow({ row, selected = false, width = 80 }) {
   const budget = Math.max(20, width - 24);
   const detail = truncate(row.detail ?? "", budget);
   const parts = [
-    txt(selected ? " ❯ " : "   ", { color: selected ? theme.colors.accent : undefined, bold: selected }),
+    txt(selected ? ` ${symbols.arrow} ` : "   ", { color: selected ? theme.colors.accent : undefined, bold: selected }),
     txt(`${ICON(symbols)[row.status] ?? "?"} `, { color }),
     txt(padEnd(row.label, 5), { bold: true }),
     txt(detail, { color: row.status === "unknown" ? theme.colors.muted : undefined, dim: row.status === "unknown" }),
-    row.action ? txt(`  · ${row.action}`, { color: theme.colors.accent }) : null,
+    row.action ? txt(`  ${symbols.dot} ${row.action}`, { color: theme.colors.accent }) : null,
   ].filter(Boolean);
   return h(Box, null, h(Text, null, ...segments(parts)));
 }
