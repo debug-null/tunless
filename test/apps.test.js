@@ -173,3 +173,12 @@ test("networkPid 对未运行的应用返回 null", async () => {
   const pid = await networkPid({ id: "antigravity", bundle: "TunlessNoSuchAppForTest" });
   assert.equal(pid, null);
 });
+
+test("processProxyEnv 只认可观察到的代理连接，读不到就说未知", async () => {
+  const { processProxyEnv } = await import("../src/core/apps.js");
+  // 不存在的进程：必须是 null（未知），不能返回 hasProxy=false 当成「没代理」
+  assert.equal(await processProxyEnv(999999), null);
+  // 当前进程一般不连代理，应返回 hasProxy:null 而不是 false
+  const self = await processProxyEnv(process.pid);
+  assert.ok(self === null || self.hasProxy === null || self.hasProxy === true);
+});

@@ -192,6 +192,7 @@ tunless proxy           # 启动本地转发代理，把代理能力交给工具
 tunless launch <应用>    # 带代理环境重启某个应用
 tunless service <操作>   # install | uninstall | status | logs
 tunless restore [序号]   # 列出 / 还原 tunless 改过的配置文件
+tunless env              # 查看写进登录会话的代理变量（clear 撤销）
 ```
 
 ### 图形界面
@@ -259,16 +260,20 @@ tunless restore [序号]   # 列出 / 还原 tunless 改过的配置文件
   （`已带代理启动（pid 58202）`）。启动失败不会打勾，而是提示你手动打开或
   用 `tunless launch <应用>` 看详细报错 —— 不再有「命令跑完就当成功」。
 
-  再往下还有一行 `进程代理`，看的是**真正联网那个子进程里的环境变量**：
+  再往下还有一行 `进程代理`，看的是**真正联网那个子进程有没有在用代理**：
 
   ```
-  进程代理    ✔ 联网进程已带上 http://127.0.0.1:8899
-  进程代理    ✖ 联网进程没有代理变量，会直连外网（表现为 i/o timeout）
+  进程代理    ✔ 正在使用 http://127.0.0.1:8899
+  进程代理    此刻没有代理连接（可能还没发请求）
   ```
 
-  这一行专治一种最容易被误判的情况：应用明明在跑、界面也显示走代理，
-  登录却报 `dial tcp 172.253.117.95:443: i/o timeout`。那是 Go 程序
-  没拿到 `HTTPS_PROXY`、直接去连谷歌真实 IP 了，跟代理有没有开无关。
+  它只报能确凿观察到的事实。**不会读环境变量来判断** —— macOS 上
+  `ps -E` 对 GUI 应用基本读不到东西，用它推「没有代理」会造成大量误报，
+  而误报比不判断更糟。
+
+  这一行专治一种情况：登录报
+  `dial tcp 172.253.117.95:443: i/o timeout`。那是 Go 程序在直连谷歌
+  真实 IP，跟代理有没有开无关。
 
 | 按键 | 作用 |
 | --- | --- |
@@ -379,11 +384,31 @@ tunless service uninstall
 Homebrew 与系统路径），并设了 `ThrottleInterval`，避免 node 升级后出现
 `env: node: No such file or directory` 那种反复崩溃。
 
+同时它会把代理写进 **launchd 登录会话**（`launchctl setenv`）。这一步很关键：
+`open --env` 只对「由 tunless 启动的那一次」有效，用户从 Dock / Finder /
+Spotlight 点开应用时环境是空的。实测过一个最小 .app 探针：
+
+- 清空 shell 的代理变量后启动 → 应用里没有任何代理变量
+- `launchctl setenv` 之后同样方式启动 → 应用里就有
+
+所以装上服务后，**从 Dock 打开 Antigravity 也会自动走 8899**，不必每次
+`tunless launch`。
+
 升级 tunless 或换了 node 版本后，建议重装一次，让 plist 里的路径跟上：
 
 ```bash
 tunless service uninstall && tunless service install
 ```
+
+查看和撤销这个会话变量：
+
+```bash
+tunless env          # 看当前写入了什么
+tunless env clear    # 撤销（已打开的应用要重启才回到直连）
+```
+
+`service uninstall` 会自动撤销，避免应用指向一个已经不存在的端口 ——
+那会让所有外网都连不上，比不设更难排查。
 
 ### 改过的配置怎么还原
 

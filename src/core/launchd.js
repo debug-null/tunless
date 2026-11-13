@@ -15,6 +15,63 @@ const AGENT_DIR = path.join(os.homedir(), "Library/LaunchAgents");
 export const PLIST_PATH = path.join(AGENT_DIR, `${LABEL}.plist`);
 export const LOG_DIR = dataDir();
 
+/**
+ * 写进 launchd 用户会话的代理环境变量。
+ *
+ * 为什么需要这个：`open --env` 只在**我们自己启动**的那一次有效。
+ * 用户从 Dock / Finder / Spotlight 点开应用时，环境里什么都没有 ——
+ * 于是 Antigravity 的 language_server 会直连 oauth2.googleapis.com 的真实 IP，
+ * 报 `dial tcp 172.253.117.95:443: i/o timeout`。
+ *
+ * 实测（构建了一个最小 .app 探针，用 open 启动后把 env 写进文件）：
+ *   - 清空 shell 里的代理变量后启动，应用里没有任何代理变量
+ *   - `launchctl setenv HTTPS_PROXY …` 之后同样方式启动，应用里就有
+ * 也就是说 setenv 是**对 GUI 登录会话生效**的，跟着用户登录走，重启后失效。
+ *
+ * 注意它需要重新登录才能彻底清除，所以必须能一键撤销。
+ */
+export const SESSION_PROXY_KEYS = [
+  "HTTPS_PROXY",
+  "HTTP_PROXY",
+  "https_proxy",
+  "http_proxy",
+  "ALL_PROXY",
+  "all_proxy",
+  "NO_PROXY",
+  "no_proxy",
+];
+
+/** 当前用户会话里已设置的代理变量 */
+export async function sessionProxyEnv() {
+  const found = {};
+  for (const key of SESSION_PROXY_KEYS) {
+    try {
+      const { stdout } = await exec("launchctl", ["getenv", key], { timeout: 5000 });
+      const value = stdout.trim();
+      if (value) found[key] = value;
+    } catch {
+      // 没有这个变量
+    }
+  }
+  return found;
+}
+
+export async function setSessionProxyEnv(env) {
+  for (const [key, value] of Object.entries(env)) {
+    await exec("launchctl", ["setenv", key, String(value)], { timeout: 5000 });
+  }
+}
+
+export async function clearSessionProxyEnv() {
+  for (const key of SESSION_PROXY_KEYS) {
+    try {
+      await exec("launchctl", ["unsetenv", key], { timeout: 5000 });
+    } catch {
+      // 本来就没设
+    }
+  }
+}
+
 function guiDomain() {
   return `gui/${process.getuid?.() ?? 501}`;
 }
@@ -127,6 +184,9 @@ export async function installService({ args = [], logDir = LOG_DIR } = {}) {
 export async function uninstallService() {
   await launchctl(["bootout", `${guiDomain()}/${LABEL}`], { ignoreFailure: true });
   if (fs.existsSync(PLIST_PATH)) fs.unlinkSync(PLIST_PATH);
+  // 服务没了，登录会话里的代理变量也一起撤掉 —— 否则应用会指向一个
+  // 已经不存在的端口，表现为「所有外网都连不上」，比不设更难排查。
+  await clearSessionProxyEnv();
   return { plist: PLIST_PATH };
 }
 

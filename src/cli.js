@@ -26,6 +26,9 @@ import {
   uninstallService,
   serviceStatus,
   readServiceLog,
+  setSessionProxyEnv,
+  sessionProxyEnv,
+  clearSessionProxyEnv,
 } from "./core/launchd.js";
 import {
   findApp,
@@ -283,11 +286,9 @@ export async function cmdDoctor(args) {
     if (p.status === "unsupported") say(dim(`      ${proxyAdvice(p)}`));
   }
 
-  // 「支持代理」不等于「现在真的在用代理」。
-  // Antigravity 登录报 `dial tcp 172.253.117.95:443: i/o timeout` 就是
-  // language_server 没拿到 HTTPS_PROXY、跑去直连谷歌真实 IP 的典型症状。
+  // 「配置写了」不等于「现在真的在用」。这里只看能确凿观察到的连接，
+  // 读不到就说读不到 —— 不拿环境变量推测定罪。
   say(head("\n── 进程实际代理 ──"));
-  let anyMissing = false;
   for (const app of APPS) {
     if (app.id === "codex") continue;
     const pid = await networkPid(app);
@@ -296,19 +297,15 @@ export async function cmdDoctor(args) {
       continue;
     }
     const env = await processProxyEnv(pid);
-    if (env === null) {
-      say(`  ${app.name.padEnd(14)} ${dim(`读不到 pid ${pid} 的环境（权限不足）`)}`);
-      continue;
-    }
-    if (env.hasProxy) {
-      say(`  ${app.name.padEnd(14)} ${ok(env.httpsProxy ?? env.allProxy)}`);
+    if (env?.hasProxy) {
+      say(`  ${app.name.padEnd(14)} ${ok(env.httpsProxy)} ${dim(`(pid ${pid})`)}`);
+    } else if (env === null) {
+      say(`  ${app.name.padEnd(14)} ${dim("读不到该进程的连接信息")}`);
     } else {
-      anyMissing = true;
-      say(`  ${app.name.padEnd(14)} ${bad("没有代理环境变量 → 会直连外网")}`);
-      say(dim(`      pid ${pid}，用 tunless launch ${app.name} 重新拉起`));
+      say(`  ${app.name.padEnd(14)} ${warn("此刻没有代理连接")} ${dim(`(pid ${pid})`)}`);
+      say(dim(`      可能还没发请求；如果它一直连不上外网，试 tunless launch ${app.name}`));
     }
   }
-  if (anyMissing) exitCode = 1;
 
   say(head("\n── 转发服务 ──"));
   say(`  ${info("tunless proxy 让工具无需 TUN 也能走代理")}`);
@@ -433,6 +430,31 @@ export async function cmdProxy(args) {
   if (socksPort) say(dim("    export ALL_PROXY=socks5://127.0.0.1:" + socksPort));
   if (noProxy) say(dim(`    export NO_PROXY=${noProxy}`));
   say(dim("    （小写变量名同样有效）"));
+
+  // 只打印 export 语句是不够的：用户从 Dock 点开应用时根本没有这个环境。
+  // 把变量写进 launchd 登录会话，所有新启动的 GUI 应用都会带上。
+  if (args.flags["session-env"] !== false) {
+    const sessionEnv = {
+      HTTPS_PROXY: `http://127.0.0.1:${httpPort}`,
+      HTTP_PROXY: `http://127.0.0.1:${httpPort}`,
+      https_proxy: `http://127.0.0.1:${httpPort}`,
+      http_proxy: `http://127.0.0.1:${httpPort}`,
+    };
+    if (socksPort) {
+      sessionEnv.ALL_PROXY = `socks5://127.0.0.1:${socksPort}`;
+      sessionEnv.all_proxy = sessionEnv.ALL_PROXY;
+    }
+    if (noProxy) {
+      sessionEnv.NO_PROXY = ["127.0.0.1", "localhost", "::1", ".local", ...suffixes].join(",");
+      sessionEnv.no_proxy = sessionEnv.NO_PROXY;
+    }
+    try {
+      await setSessionProxyEnv(sessionEnv);
+      say(dim(`    已写入登录会话（从 Dock 打开的应用也会带上）`));
+    } catch (err) {
+      say(`  ${warn(`写入登录会话失败：${err.message}`)}`);
+    }
+  }
 
   if (args.flags["print-env"] === true) {
     say();
@@ -593,22 +615,20 @@ export async function cmdLaunch(args) {
   }
   say(`\n  ${ok(`已使用 tunless 代理启动 ${app.replace(/\.app$/, "")}`)}\n`);
 
-  // 「启动成功」和「代理生效」是两件事。启动完再看一眼联网进程的环境，
-  // 才能回答用户真正关心的问题。
+  // 启动成功 ≠ 代理生效。等它真发出请求，再看这条连接去了哪儿。
   const target2 = findApp(app);
   if (target2 && target2.id !== "codex") {
-    await new Promise((r) => setTimeout(r, 1500));
-    const netPid = await networkPid(target2);
-    const netEnv = await processProxyEnv(netPid);
-    if (netEnv?.hasProxy) {
-      say(`  ${ok(`代理已生效：${netEnv.httpsProxy ?? netEnv.allProxy}`)} ${dim(`(pid ${netPid})`)}\n`);
-    } else if (netEnv === null) {
-      say(`  ${dim("读不到联网进程的环境，无法确认代理是否生效")}\n`);
-    } else {
-      say(`  ${bad("联网进程没有拿到代理变量，它仍会直连外网")}`);
-      say(dim(`    pid ${netPid}。可以试试完全退出应用后重新运行本命令\n`));
-      return 1;
+    for (let i = 0; i < 8; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      const netPid = await networkPid(target2);
+      const netEnv = await processProxyEnv(netPid);
+      if (netEnv?.hasProxy) {
+        say(`  ${ok(`代理已生效：${netEnv.httpsProxy}`)} ${dim(`(pid ${netPid})`)}\n`);
+        return 0;
+      }
     }
+    say(`  ${dim("应用已启动，但还没观察到它的代理连接")}`);
+    say(dim("    应用发出第一个请求后就会走代理；可以用 tunless doctor 复查\n"));
   }
   return 0;
 }
@@ -696,6 +716,42 @@ export async function configureCursor({ proxyUrl, yes = false, quiet = false, ap
  * 每次写应用的配置前都会备份，但之前只能自己到
  * ~/.tunless/backups/ 里手动翻文件。这里给一条命令。
  */
+/**
+ * 查看 / 撤销写进 launchd 登录会话的代理变量。
+ *
+ * 这个命令存在的理由是：我们改了系统级的东西就一定要能看见、能撤销。
+ * `launchctl setenv` 的效果会一直留到注销，撤销后必须重新启动应用才恢复。
+ */
+export async function cmdEnv(args) {
+  const action = args._[1] || "show";
+
+  if (action === "clear" || action === "unset") {
+    const before = await sessionProxyEnv();
+    await clearSessionProxyEnv();
+    if (!Object.keys(before).length) {
+      say(dim("  登录会话里本来就没有代理变量。\n"));
+      return 0;
+    }
+    say(`  ${ok("已从登录会话移除代理变量")}`);
+    for (const key of Object.keys(before)) say(dim(`    ${key}`));
+    say(dim("\n  已经打开的应用还带着旧变量，重启它们才会回到直连。\n"));
+    return 0;
+  }
+
+  const current = await sessionProxyEnv();
+  say(head("\n── 登录会话代理变量 ──\n"));
+  if (!Object.keys(current).length) {
+    say(dim("  没有设置。从 Dock / Finder 打开的应用不会自动带代理。"));
+    say(dim("  运行 `tunless service install` 或 `tunless proxy` 会写入。\n"));
+    return 0;
+  }
+  for (const [key, value] of Object.entries(current)) {
+    say(`  ${key.padEnd(12)} ${dim(value)}`);
+  }
+  say(dim("\n  撤销：tunless env clear\n"));
+  return 0;
+}
+
 export async function cmdRestore(args) {
   const action = args._[1] || "list";
   const backups = listBackups();
@@ -857,11 +913,46 @@ export async function cmdCursor(args) {
 }
 
 export async function cmdService(args) {
+  /** 生成要写进登录会话的那组代理变量 */
+  async function buildSessionEnv(serviceArgs) {
+    const httpPort = Number(serviceArgs.flags?.port || 8899);
+    const socksPort = Number(serviceArgs.flags?.["socks-port"] ?? 8898);
+    const env = {
+      HTTPS_PROXY: `http://127.0.0.1:${httpPort}`,
+      HTTP_PROXY: `http://127.0.0.1:${httpPort}`,
+      https_proxy: `http://127.0.0.1:${httpPort}`,
+      http_proxy: `http://127.0.0.1:${httpPort}`,
+    };
+    if (socksPort) {
+      env.ALL_PROXY = `socks5://127.0.0.1:${socksPort}`;
+      env.all_proxy = env.ALL_PROXY;
+    }
+    const noProxy = ["127.0.0.1", "localhost", "::1", ".local", ...ruleSuffixes(loadRules())].join(",");
+    env.NO_PROXY = noProxy;
+    env.no_proxy = noProxy;
+    return env;
+  }
+
   const action = args._[1] || args.flags.action || "status";
   const forward = ["proxy", ...process.argv.slice(4)];
 
   if (action === "install") {
-    const { plist } = await installService({ args: forward });
+    // 常驻服务要同时把代理写进登录会话，否则用户从 Dock 点开应用时
+    // 环境里依然什么都没有（那正是 Antigravity 报 i/o timeout 的场景）。
+    const installArgs = forward.includes("--session-env")
+      ? forward
+      : [...forward, "--session-env"];
+    const { plist } = await installService({ args: installArgs });
+    const writeSessionEnv = !forward.includes("--no-session-env");
+    if (writeSessionEnv) {
+      try {
+        const env = await buildSessionEnv(args);
+        await setSessionProxyEnv(env);
+        say(dim("    已写入登录会话：从 Dock / Finder 打开的应用也会带上代理"));
+      } catch (err) {
+        say(`  ${warn(`写入登录会话失败：${err.message}`)}`);
+      }
+    }
     say(`\n  ${ok("已将转发服务安装为 launchd 常驻代理")}`);
     say(dim(`    ${plist}`));
     const status = await serviceStatus();
@@ -1089,6 +1180,7 @@ ${head("用法")}
   tunless rules [操作]        add | remove | list — 手动补充内网域名/关键词/IP 段
   tunless service <操作>      install | uninstall | status | logs
   tunless restore [序号]      列出配置备份，并还原到指定那份
+  tunless env                查看写进登录会话的代理变量（clear 撤销）
 
 ${head("选项")}
   --internal-dns <ip>   内网 DNS 服务器（默认 ${DEFAULT_INTERNAL_DNS}）
@@ -1175,6 +1267,8 @@ export async function main(argv) {
         return await cmdService(args);
       case "restore":
         return await cmdRestore(args);
+      case "env":
+        return await cmdEnv(args);
       case "launch":
         return await cmdLaunch(args);
       case "cursor":

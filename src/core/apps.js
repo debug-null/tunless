@@ -745,37 +745,38 @@ export async function openApp(app, env) {
 }
 
 /**
- * 读某个进程里实际生效的代理环境变量。
+ * 进程有没有可用的代理 —— 用**行为证据**判断，不读环境变量。
  *
- * 这是「配置写了 ≠ 生效了」最后一公里的证据：Antigravity 的 language_server
- * 如果没拿到 HTTPS_PROXY，它就会去直连 oauth2.googleapis.com 的真实 IP，
- * 报 `dial tcp 172.253.117.95:443: i/o timeout` —— 和代理有没有开完全无关。
+ * 为什么不能读环境：macOS 上 `ps -E` 对 GUI 应用和普通子进程经常什么都读不到
+ * （实测 Antigravity 的 language_server 有 84 个 env token 但其中一个都不是
+ * 我们设的变量；同样的方式读自己 spawn 的 sleep 进程也读不到）。
+ * 靠它判断「没有代理」会产生大量误报 —— 而误报比不判断更糟。
  *
- * macOS 上 `ps -E` 能带出环境，但对别的用户的进程无效；拿不到时返回 null，
- * 由调用方说「未知」而不是猜。
+ * 能拿到的只有一种确凿证据：这个进程正在连本地代理端口。
+ * Go 程序把代理用在 CONNECT 上，连上了就说明它确实在用（见 processProxyPort）。
+ *
+ * 返回 null 表示「无法判断」，调用方必须如实说未知，不许猜。
  */
 export async function processProxyEnv(pid) {
   if (!pid) return null;
+  // 进程不存在时 processProxyPort 会给空数组，但那不是「没代理」，
+  // 而是「没有这个进程」。先确认它活着，别把「不存在」说成「没走代理」。
   try {
-    const { stdout } = await exec("ps", ["-E", "-p", String(pid)], {
-      timeout: 8000,
-      maxBuffer: 8 * 1024 * 1024,
-    });
-    const env = {};
-    for (const token of stdout.split(/\s+/)) {
-      const m = /^(HTTPS?_PROXY|ALL_PROXY|NO_PROXY|https?_proxy|all_proxy|no_proxy)=(.*)$/.exec(token);
-      if (m) env[m[1]] = m[2];
-    }
-    const pick = (k) => env[k] ?? env[k.toLowerCase()] ?? null;
-    const https = pick("HTTPS_PROXY");
-    const all = pick("ALL_PROXY");
+    process.kill(pid, 0);
+  } catch {
+    return null;
+  }
+  try {
+    const ports = await processProxyPort(pid);
+    if (!ports?.length) return { pid, httpsProxy: null, allProxy: null, noProxy: null, hasProxy: null };
+    const viaTunless = ports.includes(8899);
     return {
       pid,
-      httpsProxy: https,
-      allProxy: all,
-      noProxy: pick("NO_PROXY"),
-      // 有任何一个能用的就直接判定，不要求两个都设
-      hasProxy: Boolean(https || all),
+      httpsProxy: viaTunless ? "http://127.0.0.1:8899" : `http://127.0.0.1:${ports[0]}`,
+      allProxy: null,
+      noProxy: null,
+      hasProxy: true,
+      observedPorts: ports,
     };
   } catch {
     return null;
