@@ -4,7 +4,7 @@
   "description": "Run AI agents without TUN mode: give proxy-blind tools a working local proxy and keep split-horizon internal domains off the proxy",
   "type": "module",
   "bin": {
-    "tunless": "./bin/tunless.js"
+    "tunless": "bin/tunless.js"
   },
   "engines": {
     "node": ">=22"
