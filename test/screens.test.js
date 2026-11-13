@@ -7,6 +7,8 @@ import { ThemeProvider } from "../src/tui/ui.js";
 import { getTheme } from "../src/tui/theme.js";
 import { ServiceScreen } from "../src/tui/screens/service.js";
 import { DomainsScreen } from "../src/tui/screens/domains.js";
+import { UpstreamScreen } from "../src/tui/screens/upstream.js";
+import { AppsScreen } from "../src/tui/screens/apps.js";
 
 const h = React.createElement;
 const wrap = (node) => h(ThemeProvider, { theme: getTheme("dark"), unicode: true }, node);
@@ -110,4 +112,97 @@ test("domains 屏：手写规则列出内容与光标", async () => {
   assert.match(out, /wiki/);
   // 光标行前缀是主题箭头（unicode 下为 ›）
   assert.match(out, /›/);
+});
+
+const withCandidates = {
+  ...base,
+  upstream: {
+    pinned: null,
+    chosen: { host: "127.0.0.1", port: 6478 },
+    detail: "mihomo",
+    drift: null,
+    candidates: [
+      { host: "127.0.0.1", port: 7897, label: "Clash Verge", protocols: ["http", "socks5"] },
+      { host: "127.0.0.1", port: 1080, label: "sing-box", protocols: ["socks5"] },
+    ],
+  },
+};
+
+test("upstream 屏：候选列出 host:port 与来源", async () => {
+  const out = await shot(
+    wrap(h(UpstreamScreen, { state: withCandidates, width: 100, index: 0 })),
+  );
+  assert.match(out, /上游代理/);
+  assert.match(out, /127\.0\.0\.1:7897/);
+  assert.match(out, /Clash Verge/);
+  assert.match(out, /127\.0\.0\.1:1080/);
+});
+
+test("upstream 屏：手填态显示输入框与已输入内容", async () => {
+  const out = await shot(
+    wrap(
+      h(UpstreamScreen, {
+        state: withCandidates,
+        width: 100,
+        index: 0,
+        editing: true,
+        draft: "127.0.0.1:7890",
+      }),
+    ),
+  );
+  assert.match(out, /代理地址/);
+  assert.match(out, /127\.0\.0\.1:7890/);
+});
+
+test("upstream 屏：探不到候选时给手动通道", async () => {
+  const st = {
+    ...base,
+    upstream: { pinned: null, chosen: null, detail: "", drift: null, candidates: [] },
+  };
+  const out = await shot(
+    wrap(h(UpstreamScreen, { state: st, width: 100, index: 0 })),
+  );
+  assert.match(out, /没探测到可用的代理/);
+  assert.match(out, /按 m 直接填端口/);
+});
+
+const withApps = {
+  ...base,
+  apps: [
+    { id: "antigravity", name: "Antigravity", installed: true, running: true, version: "2.31.2", proxied: "ok" },
+    { id: "cursor", name: "Cursor", installed: true, running: false, version: "3.28.7", proxied: "stale" },
+    { id: "codex", name: "Codex", installed: false, running: false, proxied: "unknown" },
+  ],
+};
+
+test("apps 屏 list：列出已安装应用与走代理标记", async () => {
+  const out = await shot(
+    wrap(h(AppsScreen, { state: withApps, width: 100, appIndex: 0, stage: "list" })),
+  );
+  assert.match(out, /Antigravity/);
+  assert.match(out, /已走代理/);
+  assert.match(out, /还连着旧代理/);
+  // 没装的应用不出现在列表里
+  assert.doesNotMatch(out, /Codex/);
+});
+
+test("apps 屏 actions：why 说明 + actionsFor 动作列表", async () => {
+  const out = await shot(
+    wrap(
+      h(AppsScreen, {
+        state: withApps,
+        width: 100,
+        stage: "actions",
+        appId: "antigravity",
+        appName: "Antigravity",
+        actionIndex: 0,
+        live: null,
+        result: null,
+        executing: null,
+      }),
+    ),
+  );
+  assert.match(out, /模型请求认 HTTPS_PROXY/);
+  assert.match(out, /只注入代理环境变量后启动/);
+  assert.match(out, /只写入代理配置，不启动/);
 });

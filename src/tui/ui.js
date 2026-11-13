@@ -68,6 +68,23 @@ export function kv(label, valueSegments, labelWidth = 12) {
   ];
 }
 
+/**
+ * 可选列表行片段：❯ 指针 + 定宽标题 + 说明。
+ * 向导（steps.js）与钻取屏（screens/*）共用的行格式 ——
+ * 两边渲染同一批选项，别长成两种样子。
+ */
+export function optionRow(theme, selected, title, detail, titleWidth) {
+  return [
+    txt("  "),
+    txt(selected ? "❯ " : "  ", { color: selected ? theme.colors.accent : undefined }),
+    txt(padEnd(title, titleWidth), {
+      bold: selected,
+      color: selected ? theme.colors.accent : undefined,
+    }),
+    detail ? txt("   " + detail, { dim: true }) : null,
+  ].filter(Boolean);
+}
+
 export function Card({ title, width = 60, rows = [] }) {
   const theme = useTheme();
   const inner = Math.max(12, width - 4);

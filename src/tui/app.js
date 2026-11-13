@@ -27,6 +27,8 @@ import { HelpPanel } from "./help.js";
 import { Dashboard } from "./screens/dashboard.js";
 import { ServiceScreen } from "./screens/service.js";
 import { DomainsScreen } from "./screens/domains.js";
+import { UpstreamScreen } from "./screens/upstream.js";
+import { AppsScreen } from "./screens/apps.js";
 import { KeyBar } from "./components/key-bar.js";
 import { EventFeed } from "./components/event-feed.js";
 import { actionsFor } from "./app-menu.js";
@@ -60,9 +62,11 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const theme = useTheme();
 
   const [state, setState] = useState(emptyState);
-  // 屏幕路由：dashboard 是家，wizard 是五步向导，service/domains 是钻取屏。
-  // upstream/apps 屏下一个任务才落，回车/u 现在给一句实话提示。
+  // 屏幕路由：dashboard 是家，wizard 是五步向导，
+  // service/upstream/apps/domains 是钻取屏。
   const [screen, setScreen] = useState("dashboard");
+  // 工具屏是两段式：list 选应用 → actions 处理它，Esc 逐级后退
+  const [appsStage, setAppsStage] = useState("list");
   // 仪表盘高亮行（0..ROW_ORDER.length-1），回车按它钻进对应屏
   const [rowIndex, setRowIndex] = useState(0);
   // 服务与日志屏的事件回看偏移：0 贴最新，↑ 往回翻
@@ -484,13 +488,20 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         }
       }
 
-      setWizardStep(3);
-      setHint("");
+      // 钻取屏没有「下一步」可进：固定完就回家，结果放 hint 让人看到；
+      // 向导里照旧推进到第 3 步。
+      if (screen === "upstream") {
+        setScreen("dashboard");
+        setHint(`上游已固定 ${upstream.host}:${upstream.port}`);
+      } else {
+        setWizardStep(3);
+        setHint("");
+      }
       setActionIndex(0);
       log(`上游代理：${upstream.host}:${upstream.port} — 能出网`, "ok");
       refreshLive(appId);
     },
-    [appId, log, refreshLive, state.sidecar.installed],
+    [appId, log, refreshLive, screen, state.sidecar.installed],
   );
 
   /** 手动填写上游端口：先探测协议，再走同一套验证 */
@@ -764,8 +775,10 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         return;
       }
       if (input === "u") {
-        // 上游屏在 Task 6 才落地 —— 先给句实话，别让键死着。
-        setHint("上游详情屏还没建好 · 换上游请按 g 走向导第 2 步");
+        setScreen("upstream");
+        setUpstreamIndex(0);
+        setVerifyResult(null);
+        setHint("");
         return;
       }
       if (key.return) {
@@ -773,20 +786,18 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         if (rowId === "service") {
           setEventScroll(0);
           setScreen("service");
-          setHint("");
-          return;
-        }
-        if (rowId === "internal") {
+        } else if (rowId === "upstream") {
+          setScreen("upstream");
+          setUpstreamIndex(0);
+          setVerifyResult(null);
+        } else if (rowId === "tools") {
+          setScreen("apps");
+          setAppsStage("list");
+        } else {
+          // internal
           setScreen("domains");
-          setHint("");
-          return;
         }
-        // upstream / tools 的详情屏在 Task 6 落地，回车先报到，不装死。
-        setHint(
-          rowId === "upstream"
-            ? "上游详情屏还没建好 · 换上游请按 g 走向导第 2 步"
-            : "工具详情屏还没建好 · 操作应用请按 g 走向导",
-        );
+        setHint("");
         return;
       }
       if (key.upArrow || input === "k") {
@@ -837,6 +848,146 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       }
       if (key.downArrow || input === "j") {
         setRuleIndex((i) => Math.min(Math.max(0, total - 1), i + 1));
+        return;
+      }
+      return;
+    }
+
+    // ---- 上游屏：候选里选一个回车验证固定；m 手填走顶部输入守卫 --------
+    if (screen === "upstream") {
+      if (key.escape) {
+        setScreen("dashboard");
+        return;
+      }
+      if (input === "m") {
+        // 与向导第 2 步同一个 m 分支：有选中的就预填，没有给本地前缀
+        setEditingUpstream(true);
+        setDraftUpstream(
+          state.upstream?.chosen
+            ? `${state.upstream.chosen.host}:${state.upstream.chosen.port}`
+            : "127.0.0.1:",
+        );
+        setVerifyResult(null);
+        return;
+      }
+      const candidates = state.upstream?.candidates ?? [];
+      if (key.upArrow || input === "k") {
+        setUpstreamIndex((i) => Math.max(0, i - 1));
+        return;
+      }
+      if (key.downArrow || input === "j") {
+        setUpstreamIndex((i) => Math.min(Math.max(0, candidates.length - 1), i + 1));
+        return;
+      }
+      if (key.return) {
+        const chosen =
+          candidates[Math.min(upstreamIndex, Math.max(0, candidates.length - 1))];
+        if (!chosen) {
+          // 一个都没探到：直接进手动填写，跟向导第 2 步同一个空态分支
+          setEditingUpstream(true);
+          setDraftUpstream("127.0.0.1:");
+          setHint("没探测到代理，手动填一个端口");
+          return;
+        }
+        adoptUpstream(chosen);
+        return;
+      }
+      return;
+    }
+
+    // ---- 工具屏：list 选应用 → actions 执行动作，Esc 逐级后退 ---------
+    if (screen === "apps") {
+      const installed = (state.apps ?? []).filter((a) => a.installed);
+      if (appsStage === "actions") {
+        if (key.escape) {
+          // 回列表而不是直接回家：选择的过程还在，退回上一级
+          setAppsStage("list");
+          setStepResult(null);
+          return;
+        }
+        const total = actionsFor(appId).length;
+        if (key.upArrow || input === "k") {
+          setActionIndex((i) => Math.max(0, i - 1));
+          return;
+        }
+        if (key.downArrow || input === "j") {
+          setActionIndex((i) => Math.min(Math.max(0, total - 1), i + 1));
+          return;
+        }
+        if (key.return) {
+          if (stepResult) {
+            // 结果页的回车是「看完了」：清掉回到动作列表，不是再跑一遍
+            setStepResult(null);
+            return;
+          }
+          if (!state.sidecar.running) {
+            // 行上写的就是「回车启动转发服务」，做它承诺的事
+            setExecuting("正在启动转发服务…");
+            runProxy()
+              .catch((err) => setHint(`启动失败：${err.message}`))
+              .finally(() => setExecuting(null));
+            return;
+          }
+          const app = findApp(appId) ?? { name: appName, id: appId };
+          const action = actionsFor(appId)[Math.min(actionIndex, Math.max(0, total - 1))];
+          if (!action) return;
+          setBusy(true);
+          setExecuting(
+            appId === "codex"
+              ? `正在写入 ${appName} 的 .env…`
+              : action.id === "settings"
+                ? `正在写入 ${appName} 的代理配置…`
+                : `正在以 tunless 代理重启 ${appName}…`,
+          );
+          applyAppAction(app, action.id)
+            .then(async (result) => {
+              if (result) {
+                setStepResult(`✔ ${result}`);
+              } else {
+                // hint 在这屏不显示（底栏是事件流），失败落一条事件，
+                // 别让用户按了回车像没反应 —— 真实原因在 tui.log / hint。
+                log(`${appName} 没有处理成功`, "warn");
+              }
+              // 刚写完配置/重启过，立刻重新看真实连接
+              await refreshLive();
+            })
+            .catch((err) => setHint(`操作失败：${err.message}`))
+            .finally(() => {
+              setBusy(false);
+              setExecuting(null);
+            });
+          return;
+        }
+        return;
+      }
+      // appsStage === "list"
+      if (key.escape) {
+        setScreen("dashboard");
+        return;
+      }
+      if (key.upArrow || input === "k") {
+        setAppIndex((i) => Math.max(0, i - 1));
+        return;
+      }
+      if (key.downArrow || input === "j") {
+        setAppIndex((i) => Math.min(Math.max(0, installed.length - 1), i + 1));
+        return;
+      }
+      if (key.return) {
+        const app = installed[Math.min(appIndex, Math.max(0, installed.length - 1))];
+        if (!app) {
+          setHint("没检测到可用的工具，先装 Antigravity 或 Cursor");
+          return;
+        }
+        setAppName(app.name);
+        setAppId(app.id);
+        // live 按 appId 走 —— 换工具了就重看一眼，
+        // 别拿上一个应用的连接状态说事。
+        refreshLive(app.id);
+        setActionIndex(0);
+        setStepResult(null);
+        setAppsStage("actions");
+        setHint("");
         return;
       }
       return;
@@ -1053,6 +1204,31 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     body = h(HelpPanel, { width });
   } else if (screen === "dashboard") {
     body = h(Dashboard, { state, rowIndex, width, events });
+  } else if (screen === "upstream") {
+    body = h(UpstreamScreen, {
+      state,
+      width,
+      index: upstreamIndex,
+      pinned: state.upstream?.pinned,
+      editing: editingUpstream,
+      draft: draftUpstream,
+      verifying,
+      verifyResult,
+      embedded: false,
+    });
+  } else if (screen === "apps") {
+    body = h(AppsScreen, {
+      state,
+      width,
+      appIndex,
+      appName,
+      appId,
+      stage: appsStage,
+      actionIndex,
+      live,
+      result: stepResult,
+      executing,
+    });
   } else if (screen === "service") {
     body = h(ServiceScreen, { state, width, events, eventScroll, rows });
   } else if (screen === "domains") {
@@ -1118,18 +1294,24 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   );
 
   // 最近几条事件走 EventFeed 组件。仪表盘/服务屏自己在正文里就带了事件流，
-  // 底部再给向导屏与域名屏留一份；各屏底栏换成自己的 KeyBar，
+  // 底部再给其余屏（向导/域名/上游/工具）留一份；各屏底栏换成自己的 KeyBar，
   // hint（修复/启停的结果）有值时在 KeyBar 上方露一行，别只进事件流。
   // 帮助打开或正在输入时始终走 help 文案 —— HelpPanel 自己不写「Esc 返回」。
   const idle = !helpOpen && !editing && !editingTarget && !editingUpstream;
   const footer =
     screen === "dashboard" && idle
       ? h(KeyBar, { keys: DASHBOARD_KEYS })
-      : screen === "service" && idle
-        ? h(KeyBar, { keys: SERVICE_KEYS })
-        : screen === "domains" && idle
-          ? h(KeyBar, { keys: DOMAINS_KEYS })
-          : help;
+      : screen === "upstream" && idle
+        ? h(KeyBar, { keys: UPSTREAM_KEYS })
+        : screen === "apps" && idle
+          ? h(KeyBar, {
+              keys: appsStage === "list" ? APPS_LIST_KEYS : APPS_ACTIONS_KEYS,
+            })
+          : screen === "service" && idle
+            ? h(KeyBar, { keys: SERVICE_KEYS })
+            : screen === "domains" && idle
+              ? h(KeyBar, { keys: DOMAINS_KEYS })
+              : help;
 
   return h(
     Box,
@@ -1175,10 +1357,11 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   );
 }
 
-// 仪表盘底栏按键：只列现在真能用的（u 等 T6 屏落了再补）
+// 仪表盘底栏按键：只列现在真能用的
 const DASHBOARD_KEYS = [
   ["↑↓", "选择"],
   ["回车", "详情"],
+  ["u", "上游"],
   ["d", "域名"],
   ["l", "服务"],
   ["g", "向导"],
@@ -1199,6 +1382,25 @@ const DOMAINS_KEYS = [
   ["d", "删选中"],
   ["↑↓", "选择"],
   ["Esc", "返回"],
+];
+
+const UPSTREAM_KEYS = [
+  ["↑↓", "选择"],
+  ["回车", "确认"],
+  ["m", "手填"],
+  ["Esc", "返回"],
+];
+
+const APPS_LIST_KEYS = [
+  ["↑↓", "选择"],
+  ["回车", "处理"],
+  ["Esc", "返回"],
+];
+
+const APPS_ACTIONS_KEYS = [
+  ["↑↓", "选择"],
+  ["回车", "执行"],
+  ["Esc", "返回列表"],
 ];
 
 /**

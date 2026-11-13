@@ -5,10 +5,12 @@
 // 每一步都要用户自己回车走完（即使状态已经就绪），流程才完整可见。
 
 import { Box, Text } from "ink";
-import { h, Card, txt, segments, useTheme, useUnicode } from "./ui.js";
+import { h, Card, txt, segments, useTheme, optionRow } from "./ui.js";
 import { padEnd } from "./width.js";
 import { actionsFor } from "./app-menu.js";
 import { findApp, codexProxyState } from "../core/apps.js";
+import { StepFrame } from "./step-frame.js";
+import { UpstreamScreen } from "./screens/upstream.js";
 
 export const STEP_TITLES = [
   "选一个要联网的工具",
@@ -19,38 +21,6 @@ export const STEP_TITLES = [
 ];
 
 export const TOTAL_STEPS = STEP_TITLES.length;
-
-/** 步骤外框：标题写清楚「第几步 / 共几步」 */
-function StepFrame({ step, title, width, rows, footer }) {
-  const theme = useTheme();
-  const cardWidth = Math.max(56, Math.min(width - 2, 110));
-  return h(
-    Box,
-    { flexDirection: "column" },
-    h(
-      Text,
-      { dimColor: true },
-      `  第 ${step} 步 / 共 ${TOTAL_STEPS} 步`,
-    ),
-    h(Text, null, " "),
-    h(Card, { title, width: cardWidth, rows }),
-    footer ? h(Text, null, " ") : null,
-    footer ? h(Text, { dimColor: true }, `  ${footer}`) : null,
-  );
-}
-
-/** 指针行：❯ 表示当前选中 */
-function option(theme, selected, title, detail, titleWidth) {
-  return [
-    txt("  "),
-    txt(selected ? "❯ " : "  ", { color: selected ? theme.colors.accent : undefined }),
-    txt(padEnd(title, titleWidth), {
-      bold: selected,
-      color: selected ? theme.colors.accent : undefined,
-    }),
-    detail ? txt("   " + detail, { dim: true }) : null,
-  ].filter(Boolean);
-}
 
 /** 第 1 步：选工具 */
 export function StepApps({ state, width, index }) {
@@ -78,7 +48,7 @@ export function StepApps({ state, width, index }) {
             ? " ⚠ 还连着旧代理"
             : "";
       rows.push(
-        option(
+        optionRow(
           theme,
           i === index,
           app.name,
@@ -91,6 +61,7 @@ export function StepApps({ state, width, index }) {
 
   return h(StepFrame, {
     step: 1,
+    total: TOTAL_STEPS,
     title: STEP_TITLES[0],
     width,
     rows,
@@ -104,96 +75,16 @@ export function StepApps({ state, width, index }) {
  * 这一步不能省。以前是自动探测完直接启动，用户根本不知道请求最后落到
  * 7897 还是 7890，出问题时也没法自己判断是不是选错了端口。
  *
- * 列表来自真实探测（系统代理 / mihomo API / 本机监听端口，且都验过协议），
- * 探测不到就让用户直接写 —— 不要假装「没检测到 = 一定没有」。
+ * 渲染与钻取屏（screens/upstream.js）共用同一份内容，
+ * 只在这里套上「第 2 步 / 共 5 步」的向导外框 —— 防两边逻辑漂移。
  */
-export function StepUpstream({
-  state,
-  width,
-  index,
-  pinned,
-  editing,
-  draft,
-  verifying,
-  verifyResult,
-}) {
-  const theme = useTheme();
-  const rows = [];
-  const candidates = state.upstream?.candidates ?? [];
-
-  if (editing) {
-    rows.push([
-      txt("  代理地址 ", { bold: true }),
-      txt(draft || "", { color: theme.colors.accent }),
-      txt("█", { color: theme.colors.accent }),
-    ]);
-    rows.push([txt("  ")]);
-    rows.push([
-      txt("  "),
-      txt("回车确认 · Esc 取消 · 例：127.0.0.1:7897", { dim: true }),
-    ]);
-    if (verifyResult) {
-      rows.push([txt("  ")]);
-      rows.push([
-        txt("  "),
-        verifyResult.ok
-          ? txt(`✔ ${verifyResult.detail}`, { color: theme.colors.ok })
-          : txt(`✖ ${verifyResult.detail}`, { color: theme.colors.bad }),
-      ]);
-    }
-    return h(StepFrame, {
-      step: 2,
-      title: STEP_TITLES[1],
-      width,
-      rows,
-      footer: "输入代理的 host:port，回车确认",
-    });
-  }
-
-  if (!candidates.length) {
-    rows.push([txt("  "), txt("没探测到可用的代理", { color: theme.colors.warn })]);
-    rows.push([txt("  ")]);
-    rows.push([
-      txt("  "),
-      txt("先打开你的代理客户端（Clash / Surge / Stash / sing-box 都行）", { dim: true }),
-    ]);
-    rows.push([txt("  "), txt("按 m 直接填端口，或回车重新探测", { dim: true })]);
-  } else {
-    const widthName = Math.max(...candidates.map((c) => `${c.host}:${c.port}`.length)) + 2;
-    candidates.forEach((c, i) => {
-      const addr = `${c.host}:${c.port}`;
-      const proto = (c.protocols ?? []).join("+") || "未知";
-      rows.push(
-        option(
-          theme,
-          i === index,
-          addr,
-          `${c.label ?? ""} · ${proto}`,
-          widthName,
-        ),
-      );
-    });
-    rows.push([txt("  ")]);
-    rows.push([txt("  "), txt("m 手动填一个端口", { dim: true })]);
-  }
-
-  if (pinned) {
-    rows.push([txt("  ")]);
-    rows.push([
-      txt("  "),
-      txt(`当前固定使用 ${pinned.host}:${pinned.port}`, { dim: true }),
-    ]);
-  }
-  if (verifying) {
-    rows.push([txt("  "), txt("正在验证这个代理能不能出网…", { dim: true })]);
-  }
-
-  return h(StepFrame, {
+export function StepUpstream(props) {
+  return h(UpstreamScreen, {
+    ...props,
+    embedded: true,
     step: 2,
+    total: TOTAL_STEPS,
     title: STEP_TITLES[1],
-    width,
-    rows,
-    footer: "↑↓ 选择 · 回车确认 · m 手动填写 · Esc 上一步",
   });
 }
 
@@ -315,12 +206,13 @@ export function StepLaunch({ state, width, index, appName, appId, result, execut
     const actions = actionsFor(app?.id);
     const labelWidth = Math.max(...actions.map((a) => a.label.length)) + 2;
     actions.forEach((action, i) => {
-      rows.push(option(theme, i === index, action.label, action.detail, labelWidth));
+      rows.push(optionRow(theme, i === index, action.label, action.detail, labelWidth));
     });
   }
 
   return h(StepFrame, {
     step: 3,
+    total: TOTAL_STEPS,
     title: STEP_TITLES[2],
     width,
     rows,
@@ -350,6 +242,7 @@ export function StepReach({ state, width, reachability, appName, editingTarget, 
     ]);
     return h(StepFrame, {
       step: 4,
+      total: TOTAL_STEPS,
       title: STEP_TITLES[3],
       width,
       rows,
@@ -405,6 +298,7 @@ export function StepReach({ state, width, reachability, appName, editingTarget, 
 
   return h(StepFrame, {
     step: 4,
+    total: TOTAL_STEPS,
     title: STEP_TITLES[3],
     width,
     rows,
@@ -477,6 +371,7 @@ export function StepDomains({ state, width }) {
 
   return h(StepFrame, {
     step: 5,
+    total: TOTAL_STEPS,
     title: STEP_TITLES[4],
     width,
     rows,
