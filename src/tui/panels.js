@@ -202,6 +202,13 @@ export function OverviewPanel({ state, width, appName = null, reachability = nul
   return h(
     Box,
     { flexDirection: "column" },
+    // 一句话说清这工具是干什么的，省得用户对着界面猜。
+    h(
+      Text,
+      { dimColor: true },
+      "  给连不上外网的 agent 一个本地代理口（127.0.0.1:8899），不用开 TUN。",
+    ),
+    h(Text, null, " "),
     h(Card, { title: "四步搞定", width: cardWidth, rows: stepRows }),
     h(Text, null, " "),
     h(Text, null, ...segments([txt("  环境 ", { dim: true }), ...envSegments], "env")),
