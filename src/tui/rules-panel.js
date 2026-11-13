@@ -26,7 +26,7 @@ function flatTotal(rules) {
 
 export function RulesPanel({ state, width, height, scroll, editing, draft, ruleIndex = 0 }) {
   const theme = useTheme();
-  const cardWidth = Math.min(width, 84);
+  const cardWidth = Math.max(56, Math.min(width - 2, 110));
   const rules = state.rules ?? { domain: [], keyword: [], cidr: [] };
 
   // 编辑状态：一条输入行 + 三个可选类型
@@ -106,7 +106,7 @@ export function RulesPanel({ state, width, height, scroll, editing, draft, ruleI
 /** 「更多」面板：把原来分散的五六个面板收进来，不占主流程 */
 export function MorePanel({ state, width }) {
   const theme = useTheme();
-  const cardWidth = Math.min(width, 84);
+  const cardWidth = Math.max(56, Math.min(width - 2, 110));
   const symbols = state.core.reachable ? "内核正常" : "内核不可达";
 
   const procRows = state.processes.length

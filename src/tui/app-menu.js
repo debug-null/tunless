@@ -9,6 +9,7 @@
 
 import { Box, Text } from "ink";
 import { h, Card, txt, useTheme } from "./ui.js";
+import { padEnd } from "./width.js";
 import { APPS } from "../core/apps.js";
 
 /** 每个应用可选的处理方式 */
@@ -32,13 +33,17 @@ export const ACTIONS = [
 
 export function AppMenu({ width, index = 0, stage = "app", app = null, actionIndex = 0 }) {
   const theme = useTheme();
-  const cardWidth = Math.min(width, 76);
+  // 菜单铺满终端宽度，和总览页保持一致的观感
+  const cardWidth = Math.max(56, Math.min(width - 2, 110));
 
-  const row = (selected, title, detail) => [
+  const row = (selected, title, detail, titleWidth) => [
     txt("  ", { dim: true }),
     txt(selected ? "› " : "  ", { color: selected ? theme.colors.accent : undefined }),
-    txt(title, { bold: selected, color: selected ? theme.colors.accent : undefined }),
-    txt("    "),
+    txt(padEnd(title, titleWidth), {
+      bold: selected,
+      color: selected ? theme.colors.accent : undefined,
+    }),
+    txt("   "),
     txt(detail, { dim: true }),
   ];
 
@@ -47,10 +52,10 @@ export function AppMenu({ width, index = 0, stage = "app", app = null, actionInd
 
   if (stage === "app") {
     title = "要带代理启动哪个应用？";
-    rows = APPS.map((a, i) => row(i === index, a.name, a.description));
+    rows = APPS.map((a, i) => row(i === index, a.name, a.description, 16));
   } else {
     title = `${app?.name ?? ""} 要怎么处理？`;
-    rows = ACTIONS.map((a, i) => row(i === actionIndex, a.label, a.detail));
+    rows = ACTIONS.map((a, i) => row(i === actionIndex, a.label, a.detail, 34));
   }
 
   rows.push(

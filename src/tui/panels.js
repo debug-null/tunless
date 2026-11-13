@@ -2,10 +2,9 @@
 // 由 app.js 统一传入状态、终端宽度和滚动位置。
 
 import { Box, Text } from "ink";
-import { h, Section, Badge, Card, kv, txt, useTheme, useUnicode } from "./ui.js";
+import { h, Section, Badge, Card, kv, txt, segments, useTheme, useUnicode } from "./ui.js";
 import { padEnd, truncate, wrapText } from "./width.js";
 import { symbolSet } from "./theme.js";
-import { nextSteps } from "./help.js";
 
 export const PANELS = [
   { id: "overview", name: "开始", key: "1" },
@@ -21,11 +20,25 @@ function columnsFor(width, ratio) {
   return { nameWidth, ipWidth };
 }
 
-export function OverviewPanel({ state, width }) {
+/**
+ * 总览页：四步清单，数字键直达。
+ *
+ * 之前是「下一步做什么 + 三张状态卡片」，问题是：
+ *   · 得先读懂提示才知道该按哪个键
+ *   · 状态一变提示就变，键位含义不固定
+ *   · 卡片只占 74 列，宽终端下右边空一大片
+ *
+ * 现在固定四步（选工具 → 用代理启动 → 测连通 → 内网域名），
+ * 状态一目了然，卡片铺满终端宽度。
+ */
+export function OverviewPanel({ state, width, appName = null, reachability = null }) {
   const theme = useTheme();
   const symbols = symbolSet(useUnicode());
+  const unicode = useUnicode();
+  // 卡片铺满终端宽度：之前固定 74 列，宽终端下右边空一大片。
+  const cardWidth = Math.max(56, Math.min(width - 2, 110));
+  const stepMarks = unicode ? ["①", "②", "③", "④"] : ["1", "2", "3", "4"];
 
-  /** 状态徽标片段 */
   const badge = (tone, text) => {
     const symbol = symbols[tone];
     const color = theme.colors[tone] ?? theme.colors.info;
@@ -33,131 +46,166 @@ export function OverviewPanel({ state, width }) {
     return txt(text ? `${symbol} ${text}` : symbol, { color });
   };
 
-  const coreRows = [];
-  if (state.core.reachable) {
-    coreRows.push(
-      kv("客户端", [txt(state.frontend?.label ?? "未知")]),
-      kv("内核版本", [txt(`${state.core.version ?? "未知"}  ${state.core.mode ?? "-"} 模式`)]),
-      kv("混合端口", [
-        state.core.mixedPort
-          ? txt(String(state.core.mixedPort))
-          : txt("未开放", { color: theme.colors.muted }),
-      ]),
-      kv("TUN 模式", [
-        badge(state.core.tun ? "ok" : "warn", state.core.tun ? "已开启" : "已关闭"),
-      ]),
-    );
-    if (!state.core.tun) {
-      coreRows.push([txt("  只有完全忽略代理的程序才需要它", { dim: true })]);
-    }
-  } else {
-    coreRows.push(kv("状态", [badge("bad", "内核不可达")]));
-    for (const e of state.errors.slice(0, 3)) {
-      coreRows.push(kv("", [txt(e, { color: theme.colors.bad })]));
-    }
-  }
-
-  if (state.systemProxy) {
-    const sys = state.systemProxy;
-    coreRows.push(
-      kv("系统代理", [
-        sys.httpEnabled && sys.httpsEnabled
-          ? badge("ok", `已启用 ${sys.host}:${sys.port}`)
-          : badge("warn", "未启用"),
-      ]),
-    );
-  }
+  // 状态列固定宽度：四行的说明文字才会对齐成一条竖线。
+  const STATUS_WIDTH = 12;
+  const statusCell = (tone, text) => {
+    const symbol = symbols[tone];
+    const color = theme.colors[tone] ?? theme.colors.info;
+    const label = symbol ? `${symbol} ${text}` : text;
+    return txt(padEnd(label, STATUS_WIDTH), { color });
+  };
 
   const side = state.sidecar;
-  const sideRows = [
-    kv("转发服务", [
-      side.running ? badge("ok", `运行中 (pid ${side.pid})`) : badge("warn", "未运行"),
-    ]),
-    kv("  HTTP", [
-      side.httpOpen
-        ? badge("ok", `127.0.0.1:${side.httpPort}`)
-        : badge("muted", "未监听"),
-    ]),
-    kv("  SOCKS5", [
-      side.socksOpen
-        ? badge("ok", `127.0.0.1:${side.socksPort}`)
-        : badge("muted", "未监听"),
-    ]),
-  ];
+  const core = state.core;
 
-  const loading = state.loading;
-  const summaryRows = [
-    kv("内网域名", [
-      loading
-        ? txt("扫描中…", { dim: true })
-        : txt(String(state.internalDomains.length), { bold: true }),
-      loading ? null : txt(" 个解析到私网地址"),
-    ].filter(Boolean)),
-    kv("公网域名", [txt(loading ? "—" : `${state.publicCount} 个`)]),
-    kv("仍为假 IP", [txt(loading ? "—" : `${state.fakeCount} 个`)]),
-    kv("无法解析", [txt(loading ? "—" : `${state.unresolvedCount} 个`)]),
-    kv(
-      "归并后缀",
-      loading
-        ? [txt("—")]
-        : state.suffixes.length
-          ? state.suffixes.flatMap((suffix, i) => [
-              i > 0 ? txt("、", { dim: true }) : null,
-              txt(suffix, { color: theme.colors.info }),
-            ]).filter(Boolean)
-          : [txt("无")],
+  // ---- 步骤清单 -------------------------------------------------------
+  // 每行：序号 · 标题 · 状态 · 说明
+  const stepRow = (index, title, statusCellSeg, detail) =>
+    [
+      txt("  "),
+      txt(`${stepMarks[index]} `, { color: theme.colors.accent, bold: true }),
+      txt(padEnd(title, 12), { bold: true }),
+      statusCellSeg,
+      detail ? txt(detail, { dim: true }) : null,
+    ].filter(Boolean);
+
+  const steps = [];
+
+  // ① 选工具
+  const installed = (state.apps ?? []).filter((a) => a.installed);
+  const appDetail = appName
+    ? `已选 ${appName}`
+    : installed.length
+      ? installed
+          .map(
+            (a) =>
+              `${a.name}${a.version ? ` ${a.version}` : ""}${a.running ? "（在跑）" : ""}`,
+          )
+          .join(" · ")
+      : "没检测到支持的工具";
+  steps.push(
+    stepRow(
+      0,
+      "选工具",
+      statusCell(appName ? "ok" : "warn", appName ? "已选" : "待选择"),
+      appDetail,
     ),
+  );
+
+  // ② 用代理启动
+  const serviceState = statusCell(side.running ? "ok" : "warn", side.running ? "服务在跑" : "服务没跑");
+  steps.push(
+    stepRow(
+      1,
+      "用代理启动",
+      serviceState,
+      side.running
+        ? `HTTP ${side.httpPort} · SOCKS5 ${side.socksPort} · 按 2 选应用`
+        : "按 2 先启动转发服务",
+    ),
+  );
+
+  // ③ 测连通性
+  const reach = reachability;
+  const reachStatus = reach
+    ? statusCell(reach.ok ? "ok" : "bad", reach.ok ? "通了" : "不通")
+    : statusCell("muted", "没测过");
+  steps.push(
+    stepRow(2, "测连通性", reachStatus, reach ? reach.detail : "按 3 实测一次外网"),
+  );
+
+  // ④ 内网域名
+  const domainStatus = state.loading
+    ? statusCell("muted", "扫描中")
+    : txt(padEnd(`${state.internalDomains.length} 个`, STATUS_WIDTH), {
+        bold: true,
+        color: state.fakeCount > 0 ? theme.colors.warn : theme.colors.text,
+      });
+  const needFix = state.fakeCount > 0;
+  steps.push(
+    stepRow(
+      3,
+      "内网域名",
+      domainStatus,
+      state.loading
+        ? ""
+        : needFix
+          ? `${state.fakeCount} 个还拿到假 IP，按 4 修复`
+          : "解析正常，按 4 查看",
+    ),
+  );
+
+  const stepRows = [
+    ...steps,
+    [txt("  ")],
+    [
+      txt("  "),
+      txt("按 ", { dim: true }),
+      txt("1", { color: theme.colors.accent, bold: true }),
+      txt(" 选工具 · ", { dim: true }),
+      txt("2", { color: theme.colors.accent, bold: true }),
+      txt(" 用代理启动 · ", { dim: true }),
+      txt("3", { color: theme.colors.accent, bold: true }),
+      txt(" 测连通 · ", { dim: true }),
+      txt("4", { color: theme.colors.accent, bold: true }),
+      txt(" 内网域名 · ", { dim: true }),
+      txt("a", { color: theme.colors.accent, bold: true }),
+      txt(" 手写域名 · ", { dim: true }),
+      txt("q", { color: theme.colors.accent, bold: true }),
+      txt(" 退出", { dim: true }),
+    ],
   ];
 
-  const cardWidth = Math.min(width, 74);
+  // ---- 环境：挤成一行，别再撑一张空荡荡的卡片 -----------------------
+  const envSegments = [];
+  if (core.reachable) {
+    envSegments.push(
+      txt(`${state.frontend?.label ?? "未知"} ${core.version ?? ""}`.trim()),
+      txt(" · 端口 ", { dim: true }),
+      txt(String(core.mixedPort ?? "无")),
+    );
+  } else {
+    envSegments.push(badge("bad", "内核连不上"));
+  }
+  envSegments.push(txt(" · TUN ", { dim: true }));
+  envSegments.push(core.tun ? badge("warn", "开着") : badge("ok", "关着"));
+  const sys = state.systemProxy;
+  envSegments.push(txt(" · 系统代理 ", { dim: true }));
+  envSegments.push(
+    sys && sys.httpEnabled && sys.httpsEnabled
+      ? badge("ok", `${sys.host}:${sys.port}`)
+      : badge("warn", "没开"),
+  );
 
-  // 提示可能很长，在卡片里按显示宽度换行，不截断
-  const noteRows = state.notes?.length
-    ? state.notes.slice(0, 3).flatMap((note) => {
-        const lines = wrapText(note.replace(/\n/g, " "), cardWidth - 6);
-        return lines.map((text, i) =>
-          i === 0 ? [txt("  "), badge("warn", text)] : [txt("    " + text)],
-        );
-      })
-    : null;
+  const extraRows = [];
+  const manualCount = Object.values(state.rules ?? {}).reduce(
+    (sum, list) => sum + (list?.length ?? 0),
+    0,
+  );
+  if (manualCount) {
+    extraRows.push(
+      kv("手写规则", [txt(`${manualCount} 条`, { bold: true }), txt("  按 4 查看", { dim: true })], 10),
+    );
+  }
 
-  // 宽终端下把「代理内核」和「转发服务」并排放，避免右边空一大片
-  const twoColumn = width >= 96;
-
-  // 并排的两张卡片高度要一致，否则右边的框会在半空中收尾
-  const height = Math.max(coreRows.length, sideRows.length);
-  const pad = (rows) => [...rows, ...Array.from({ length: height - rows.length }, () => [])];
-  const coreCardRows = pad(coreRows);
-  const sideCardRows = pad(sideRows);
-
-  const stepRows = nextSteps(state).map((step) => [
-    txt("  "),
-    step.key
-      ? txt(`按 ${step.key}`, { color: theme.colors.accent, bold: true })
-      : txt("说明", { dim: true }),
-    txt("  "),
-    txt(step.text),
-  ]);
+  const noteRows = [];
+  for (const note of (state.notes ?? []).slice(0, 1)) {
+    for (const [i, text] of wrapText(note.replace(/\n/g, " "), cardWidth - 10).entries()) {
+      noteRows.push(
+        i === 0
+          ? [txt("  "), badge("warn", text)]
+          : [txt("    "), txt(text, { dim: true })],
+      );
+    }
+  }
 
   return h(
     Box,
     { flexDirection: "column" },
-    h(Card, { title: "下一步做什么", width: cardWidth, rows: stepRows }),
-    twoColumn
-      ? h(
-          Box,
-          { flexDirection: "row", gap: 1 },
-          h(Card, { title: "代理内核", width: 48, rows: coreCardRows }),
-          h(Card, { title: "转发服务", width: 40, rows: sideCardRows }),
-        )
-      : h(
-          Box,
-          { flexDirection: "column" },
-          h(Card, { title: "代理内核", width: cardWidth, rows: coreRows }),
-          h(Card, { title: "转发服务", width: cardWidth, rows: sideRows }),
-        ),
-    h(Card, { title: "内网概况", width: cardWidth, rows: summaryRows }),
-    noteRows ? h(Card, { title: "提示", width: cardWidth, rows: noteRows }) : null,
+    h(Card, { title: "四步搞定", width: cardWidth, rows: stepRows }),
+    h(Text, null, " "),
+    h(Text, null, ...segments([txt("  环境 ", { dim: true }), ...envSegments], "env")),
+    ...extraRows,
+    noteRows.length ? h(Card, { title: "提示", width: cardWidth, rows: noteRows }) : null,
   );
 }
-

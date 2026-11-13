@@ -7,7 +7,7 @@
 
 import React, { useCallback, useEffect, useState } from "react";
 import { render, renderToString, Box, Text, useApp, useInput, useStdout } from "ink";
-import { h, ThemeProvider, Tabs, useTheme } from "./ui.js";
+import { h, ThemeProvider, useTheme } from "./ui.js";
 import { getTheme, detectUnicode } from "./theme.js";
 import { queryTerminalColorScheme, themeFromEnv } from "./terminal-theme.js";
 import { PANELS, OverviewPanel } from "./panels.js";
@@ -19,6 +19,7 @@ import { addRule, removeRule, saveRules, loadRules, RULE_KINDS } from "../core/r
 import { isFirstRun, markSeen } from "./first-run.js";
 import { collectState, emptyState } from "./state.js";
 import { startService, stopService } from "../core/launchd.js";
+import { checkReachability } from "../core/reach.js";
 const PANEL_COMPONENTS = {
   overview: OverviewPanel,
   rules: RulesPanel,
@@ -26,7 +27,7 @@ const PANEL_COMPONENTS = {
   help: HelpPanel,
 };
 
-const DEFAULT_HINT = "← → 换页 · s 开关转发服务 · l 选应用启动 · a 加内网域名 · f 修 DNS · q 退出";
+const DEFAULT_HINT = "1 选工具 · 2 用代理启动 · 3 测连通 · 4 内网域名 · a 手写域名 · ← → 换页 · q 退出";
 
 /** 按 l 能依次启动的应用；这些是实际验证过「靠环境变量/配置能走代理」的 */
 export function App({ internalDns, repoRoots = [], includeChrome = false }) {
@@ -54,6 +55,10 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const [appMenuIndex, setAppMenuIndex] = useState(0);
   const [actionIndex, setActionIndex] = useState(0);
   const [pickedApp, setPickedApp] = useState(null);
+  // 第一步选中的工具，界面上要一直显示出来。
+  const [appName, setAppName] = useState(null);
+  // 连通性实测结果单独存，刷新状态时不该被冲掉。
+  const [reach, setReach] = useState(null);
 
   const log = useCallback((text, kind = "info") => {
     const time = new Date().toLocaleTimeString("zh-CN", { hour12: false });
@@ -120,6 +125,31 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     log("转发服务已启动", "ok");
     await refresh();
   }, [state.sidecar.running, state.sidecar.installed, log, refresh]);
+
+  /**
+   * 实测一次连通性：转发服务在跑 ≠ 外网真的通。
+   * 这一步就是拿一个真实请求走一遍代理隧道。
+   */
+  const runReach = useCallback(async () => {
+    log("正在通过转发服务实测外网…", "info");
+    const result = await checkReachability({ port: state.sidecar.httpPort });
+    setReach(result);
+    log(result.ok ? `连通性正常 — ${result.detail}` : `连通性有问题 — ${result.detail}`, result.ok ? "ok" : "bad");
+    setHint(result.ok ? `外网通了：${result.detail}` : `外网不通：${result.detail}`);
+  }, [state.sidecar.httpPort, log]);
+
+  /** ② 用代理启动：服务没跑就先起服务，跑了就进选应用的菜单 */
+  const stepLaunch = useCallback(async () => {
+    if (!state.sidecar.running) {
+      log("转发服务没在跑，先把它启动…", "info");
+      await runProxy();
+      setHint("转发服务已启动，再按 2 选应用");
+      return;
+    }
+    setAppMenu(true);
+    setMenuStage(pickedApp ? "action" : "app");
+    setActionIndex(0);
+  }, [state.sidecar.running, pickedApp, runProxy]);
 
   const runService = useCallback(async () => {
     log("正在切换转发服务状态…", "info");
@@ -193,6 +223,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const applyAppAction = useCallback(
     async (app, actionId) => {
       if (!app) return;
+      setAppName(app.name);
       if (actionId === "env") {
         await launchApp(app.name, { writeSettings: false });
         return;
@@ -252,12 +283,25 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         else if (name === "service") await runService();
         else if (name === "launch") await runLaunch();
         else if (name === "cursor") await runCursor();
+        else if (name === "step-launch") await stepLaunch();
+        else if (name === "reach") await runReach();
       } catch (err) {
         log(`操作失败：${err.message}`, "bad");
       }
       setBusy(false);
     },
-    [busy, refresh, runFix, runProxy, runService, runLaunch, runCursor, log],
+    [
+      busy,
+      refresh,
+      runFix,
+      runProxy,
+      runService,
+      runLaunch,
+      runCursor,
+      stepLaunch,
+      runReach,
+      log,
+    ],
   );
 
   // 首次进入自动采集一次。
@@ -370,6 +414,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       if (key.return) {
         if (menuStage === "app") {
           setPickedApp(APPS[appMenuIndex]);
+          setAppName(APPS[appMenuIndex].name);
           setActionIndex(0);
           setMenuStage("action");
           return;
@@ -379,7 +424,6 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         setAppMenu(false);
         setMenuStage("app");
         setAppMenuIndex(0);
-        setPickedApp(null);
         applyAppAction(app, action.id);
         return;
       }
@@ -496,9 +540,28 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       return;
     }
 
-    const hit = PANELS.find((p) => p.key === input);
-    if (hit) {
-      switchPanel(hit.id);
+    // 数字键 = 四步，不再是切标签页。
+    if (input === "1") {
+      setAppMenu(true);
+      setMenuStage("app");
+      setAppMenuIndex(0);
+      setHint("");
+      return;
+    }
+    if (input === "2") {
+      runAction("step-launch");
+      return;
+    }
+    if (input === "3") {
+      runAction("reach");
+      return;
+    }
+    if (input === "4") {
+      switchPanel("rules");
+      return;
+    }
+    if (input === "m") {
+      switchPanel("more");
       return;
     }
     if (input === "h" || input === "?") {
@@ -523,7 +586,9 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         runAction("service");
         return;
       case "l":
-        runAction("launch");
+        setAppMenu(true);
+        setMenuStage("app");
+        setAppMenuIndex(0);
         return;
       case "L":
         runAction("cursor");
@@ -548,7 +613,11 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     editing,
     draft,
     ruleIndex,
+    appName,
+    reachability: reach,
   };
+
+  const panelTitle = PANELS.find((p) => p.id === panel)?.name ?? "开始";
 
   const right = busy
     ? h(Text, { color: theme.colors.warn }, progress || "正在采集…")
@@ -579,11 +648,14 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     h(
       Box,
       { flexDirection: "row", justifyContent: "space-between" },
-      h(Text, { color: theme.colors.accent, bold: true }, " tunless "),
-      h(Text, { dimColor: true }, "Agent 免 TUN 联网 · 按 s 开服务，按 l 开应用，按 a 加内网域名"),
+      h(
+        Text,
+        { color: theme.colors.accent, bold: true },
+        ` tunless · ${panelTitle} `,
+      ),
+      h(Text, { dimColor: true }, "Agent 免 TUN 联网"),
       right,
     ),
-    h(Tabs, { items: PANELS, activeId: panel }),
     h(
       Box,
       { flexDirection: "column", flexGrow: 1, overflow: "hidden" },

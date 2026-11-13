@@ -41,6 +41,24 @@ export function txt(text, opts = {}) {
   return { text: String(text), ...opts };
 }
 
+/** 把一组文本片段渲染成 React 元素（不能直接把片段丢给 <Text>） */
+export function segments(parts, keyPrefix = "s") {
+  return parts
+    .filter(Boolean)
+    .map((seg, i) =>
+      h(
+        Text,
+        {
+          key: `${keyPrefix}-${i}`,
+          color: seg.color,
+          dimColor: seg.dim,
+          bold: seg.bold,
+        },
+        seg.text,
+      ),
+    );
+}
+
 /** 键值行片段：标签按显示宽度补齐 */
 export function kv(label, valueSegments, labelWidth = 12) {
   return [
@@ -56,27 +74,46 @@ export function Card({ title, width = 60, rows = [] }) {
   const border = theme.colors.border;
   const glyphs = borderSet(useUnicode());
 
-  /** 片段超出卡片宽度时按显示宽度裁剪 */
-  const fit = (segments) => {
-    const out = [];
+  /**
+   * 一行内容放不下时折行，而不是把字砍掉。
+   * 之前是直接 truncate，用户看到的是「带代理…」这种断句，读不出意思。
+   * 折行时后续行按同样的缩进对齐，视觉上仍是一段话。
+   */
+  const layout = (segments) => {
+    const lines = [[]];
     let used = 0;
+
     for (const seg of segments) {
-      if (used >= inner) break;
-      const w = displayWidth(seg.text);
+      const text = String(seg.text ?? "");
+      const w = displayWidth(text);
       if (used + w <= inner) {
-        out.push(seg);
+        lines[lines.length - 1].push(seg);
         used += w;
         continue;
       }
-      const cut = truncate(seg.text, inner - used);
-      if (cut) out.push({ ...seg, text: cut });
-      break;
+
+      // 这个片段自己就超宽：按可用宽度切成多段
+      let remaining = text;
+      let avail = inner - used;
+      while (displayWidth(remaining) > avail) {
+        const cut = truncate(remaining, avail);
+        if (!cut) break;
+        lines[lines.length - 1].push({ ...seg, text: cut });
+        remaining = remaining.slice(cut.length - 1); // 去掉末尾的 …
+        lines.push([]);
+        used = 0;
+        avail = inner;
+      }
+      if (remaining) {
+        lines[lines.length - 1].push({ ...seg, text: remaining });
+        used = displayWidth(remaining);
+      }
     }
-    return out;
+    return lines;
   };
 
-  const line = (segments) => {
-    const fitted = fit(segments);
+  const line = (segments, indent = 0) => {
+    const fitted = segments;
     const used = fitted.reduce((sum, seg) => sum + displayWidth(seg.text), 0);
     const pad = Math.max(0, inner - used);
     return h(
@@ -84,6 +121,7 @@ export function Card({ title, width = 60, rows = [] }) {
       null,
       h(Text, { color: border }, glyphs.vertical),
       " ",
+      " ".repeat(indent),
       ...fitted.map((seg, i) =>
         h(
           Text,
@@ -116,12 +154,23 @@ export function Card({ title, width = 60, rows = [] }) {
     ? line([txt(title, { color: theme.colors.text, bold: true })])
     : null;
 
+  // 每行内容折行后的所有物理行
+  const bodyRows = [];
+  for (const row of rows) {
+    const segments = Array.isArray(row) ? row : [txt(String(row))];
+    const lines = layout(segments);
+    for (let i = 0; i < lines.length; i += 1) {
+      // 续行跟首行内容对齐（首行前面通常有缩进），这里用 2 列
+      bodyRows.push(line(lines[i], i === 0 ? 0 : 2));
+    }
+  }
+
   return h(
     Box,
     { flexDirection: "column" },
     top,
     titleRow,
-    ...rows.map((row, i) => line(Array.isArray(row) ? row : [txt(String(row))])),
+    ...bodyRows,
     bottom,
   );
 }

@@ -9,6 +9,7 @@ import { inspectProcesses } from "../core/proc.js";
 import { serviceStatus } from "../core/launchd.js";
 import { mergeHostsValidated, partitionByKind } from "../core/plan.js";
 import { loadRules, ruleSuffixes } from "../core/rules.js";
+import { APPS, isAppInstalled, appVersion, mainPid } from "../core/apps.js";
 import net from "node:net";
 
 const DEFAULT_INTERNAL_DNS = "10.249.150.130";
@@ -57,6 +58,8 @@ export function emptyState() {
       socksOpen: false,
     },
     internalDomains: [],
+    apps: [],
+    reachability: null,
     publicCount: 0,
     fakeCount: 0,
     unresolvedCount: 0,
@@ -114,6 +117,26 @@ export async function collectState({
 
   notify("正在检测系统代理…");
   state.systemProxy = await systemProxyState();
+
+  // 已安装的应用：第一步「选工具」要靠它。
+  try {
+    state.apps = await Promise.all(
+      APPS.map(async (app) => {
+        const installed = await isAppInstalled(app);
+        const pid = installed ? await mainPid(app) : null;
+        return {
+          id: app.id,
+          name: app.name,
+          description: app.description,
+          installed,
+          running: Boolean(pid),
+          version: appVersion(app.bundle),
+        };
+      }),
+    );
+  } catch (err) {
+    state.errors.push(`应用检测失败 — ${err.message}`);
+  }
 
   // 转发服务
   try {

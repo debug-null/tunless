@@ -75,6 +75,11 @@ const baseState = {
   unresolvedCount: 1,
   suffixes: ["17u.cn", "17usoft.com"],
   processes: [{ pid: 1, comm: "antigravity", status: "supported" }],
+  apps: [
+    { id: "antigravity", name: "Antigravity", installed: true, running: true, version: "2.31.2" },
+    { id: "cursor", name: "Cursor", installed: true, running: true, version: "3.28.7" },
+  ],
+  rules: { domain: [], keyword: [], cidr: [] },
   notes: [],
   errors: [],
   updatedAt: null,
@@ -107,26 +112,31 @@ test("总览面板渲染出关键状态", async () => {
   const text = await shot(
     h(Box, { flexDirection: "column", width: 120 }, h(OverviewPanel, { state: baseState, width: 120 })),
   );
-  assert.match(text, /代理内核/);
+  assert.match(text, /四步搞定/);
+  assert.match(text, /选工具/);
+  assert.match(text, /用代理启动/);
+  assert.match(text, /测连通性/);
+  assert.match(text, /内网域名/);
+  assert.match(text, /8899/);
   assert.match(text, /Clash Verge Rev/);
-  assert.match(text, /TUN 模式/);
-  assert.match(text, /已关闭/);
-  assert.match(text, /127\.0\.0\.1:8899/);
+  assert.match(text, /TUN/);
 });
 
-test("键值行的值按显示宽度对齐（中文标题不错位）", async () => {
+test("四步清单的标题列对齐（中文标题不错位）", async () => {
   const text = await shot(
     h(Box, { flexDirection: "column", width: 120 }, h(OverviewPanel, { state: baseState, width: 120 })),
   );
-  const rows = text.split("\n").filter((line) => /客户端|内核版本|混合端口/.test(line));
-  assert.equal(rows.length, 3);
-  // 「客户端」（6 列）与「内核版本」（8 列）标题宽度不同，值的起始列必须一致
-  const starts = rows.map((line) => {
-    const m = /^\s*(\S+)\s+(\S.*)$/.exec(line);
-    assert.ok(m, `无法解析行：${line}`);
-    return displayWidth(line.slice(0, m.index + m[0].indexOf(m[2])));
+  const titles = ["选工具", "用代理启动", "测连通性", "内网域名"];
+  const starts = titles.map((title) => {
+    const line = text
+      .split("\n")
+      .find((l) => l.includes(title) && !l.includes("按 1"));
+    assert.ok(line, `找不到步骤行：${title}`);
+    const index = line.indexOf(title);
+    // 标题后面的空白是补齐的，所以标题起点必须一致
+    return displayWidth(line.slice(0, index));
   });
-  assert.equal(new Set(starts).size, 1, `值列起点不一致：${starts.join(",")}`);
+  assert.equal(new Set(starts).size, 1, `标题列终点不一致：${starts.join(",")}`);
 });
 
 test("规则面板显示自动扫描结果与手动规则", async () => {
