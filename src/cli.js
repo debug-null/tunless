@@ -37,6 +37,7 @@ import {
   applyCursorSettingsText,
   stripJsonc,
   backupFile,
+  listBackups,
   quitApp,
   openApp,
   readCodexEnv,
@@ -634,6 +635,64 @@ export async function configureCursor({ proxyUrl, yes = false, quiet = false, ap
 }
 
 /**
+ * 列出 / 还原配置备份。
+ *
+ * 每次写应用的配置前都会备份，但之前只能自己到
+ * ~/.tunless/backups/ 里手动翻文件。这里给一条命令。
+ */
+export async function cmdRestore(args) {
+  const action = args._[1] || "list";
+  const backups = listBackups();
+
+  if (action === "list" || action === undefined) {
+    say(head("\n── 配置备份 ──\n"));
+    if (!backups.length) {
+      say(dim("  还没有备份。改过应用配置之后才会有。\n"));
+      return 0;
+    }
+    backups.slice(0, 20).forEach((b, i) => {
+      const when = b.mtime.toLocaleString("zh-CN", { hour12: false });
+      if (b.legacy) {
+        say(`  ${dim(`${i + 1}.`)} ${when}  ${dim(b.name)} ${warn("（旧格式，无法自动还原）")}`);
+      } else {
+        say(`  ${info(`${i + 1}.`)} ${when}  ${b.target}`);
+      }
+    });
+    say(dim(`\n  共 ${backups.length} 份。还原：tunless restore <序号>\n`));
+    return 0;
+  }
+
+  const index = Number(action) - 1;
+  const target = Number.isInteger(index) ? backups[index] : null;
+  if (!target) {
+    say(`  ${bad(`没有第 ${action} 份备份`)}`);
+    return 1;
+  }
+  if (target.legacy) {
+    say(`  ${warn("这份备份是旧格式，不知道它来自哪个文件，没法自动还原")}`);
+    say(dim(`    文件还在：${target.file}`));
+    return 1;
+  }
+
+  say(`\n  即将把备份还原到：${info(target.target)}`);
+  const answer =
+    args.flags.yes === true
+      ? "y"
+      : await prompt(`${warn("这会覆盖当前内容")}，确认？[y/N] `);
+  if (!/^y(es)?$/i.test(answer.trim())) {
+    say(dim("\n  已取消\n"));
+    return 1;
+  }
+
+  // 覆盖前先给当前内容也留一份，防止还原错了回不去
+  if (fs.existsSync(target.target)) backupFile(target.target);
+  fs.mkdirSync(path.dirname(target.target), { recursive: true });
+  fs.copyFileSync(target.file, target.target);
+  say(`  ${ok("已还原")}  ${target.target}\n`);
+  return 0;
+}
+
+/**
  * Codex 专用：把代理写进 ~/.codex/.env。
  *
  * 为什么要改文件而不是只设环境变量 —— 实测结论：
@@ -973,6 +1032,7 @@ ${head("用法")}
   tunless cursor              给 Cursor 配好代理并带代理重启（专治模型连不上）
   tunless rules [操作]        add | remove | list — 手动补充内网域名/关键词/IP 段
   tunless service <操作>      install | uninstall | status | logs
+  tunless restore [序号]      列出配置备份，并还原到指定那份
 
 ${head("选项")}
   --internal-dns <ip>   内网 DNS 服务器（默认 ${DEFAULT_INTERNAL_DNS}）
@@ -1057,6 +1117,8 @@ export async function main(argv) {
         return await cmdProxy(args);
       case "service":
         return await cmdService(args);
+      case "restore":
+        return await cmdRestore(args);
       case "launch":
         return await cmdLaunch(args);
       case "cursor":

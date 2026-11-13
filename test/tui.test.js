@@ -388,7 +388,7 @@ test("状态行：用户触发的动作高亮显示，后台采集用安静的�
   assert.doesNotMatch(background, /⟳/);
 });
 
-test("第 2 步：Codex 配置对了但客户端还连着旧代理时，明确说要重启", async () => {
+test("第 2 步：配置对了但应用还连着旧代理时，明确说要重启", async () => {
   const text = await shot(
     h(
       Box,
@@ -400,16 +400,20 @@ test("第 2 步：Codex 配置对了但客户端还连着旧代理时，明确�
         appName: "Codex",
         appId: "codex",
         result: null,
-        desktop: { running: true, pids: [1], ports: [7897] },
+        live: {
+          pids: [1],
+          ports: [7897],
+          verdict: { state: "stale", ports: [7897] },
+        },
       }),
     ),
   );
-  assert.match(text, /客户端实际/);
+  assert.match(text, /实际连接/);
   assert.match(text, /还连着 127\.0\.0\.1:7897/);
-  assert.match(text, /需要重启客户端/);
+  assert.match(text, /需要重启/);
 });
 
-test("第 2 步：客户端已经走 8899 时显示已生效", async () => {
+test("第 2 步：应用已经走 8899 时显示已生效", async () => {
   const text = await shot(
     h(
       Box,
@@ -421,10 +425,14 @@ test("第 2 步：客户端已经走 8899 时显示已生效", async () => {
         appName: "Codex",
         appId: "codex",
         result: null,
-        desktop: { running: true, pids: [1], ports: [8899] },
+        live: {
+          pids: [1],
+          ports: [8899],
+          verdict: { state: "ok", ports: [8899] },
+        },
       }),
     ),
   );
   assert.match(text, /已走 127\.0\.0\.1:8899/);
-  assert.doesNotMatch(text, /需要重启客户端/);
+  assert.doesNotMatch(text, /需要重启/);
 });

@@ -24,7 +24,7 @@ import {
 } from "./steps.js";
 import { HelpPanel } from "./help.js";
 import { actionsFor } from "./app-menu.js";
-import { APPS, findApp } from "../core/apps.js";
+import { APPS, findApp, appProxyPorts, proxyVerdict } from "../core/apps.js";
 import { addRule, removeRule, saveRules, loadRules, RULE_KINDS } from "../core/rules.js";
 import { markSeen } from "./first-run.js";
 import { collectState, emptyState } from "./state.js";
@@ -49,8 +49,9 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const [stepResult, setStepResult] = useState(null);
   // 第 3 步：连通性实测结果
   const [reach, setReach] = useState(null);
-  // Codex 桌面客户端：在跑吗、实际连的是哪个代理端口
-  const [desktop, setDesktop] = useState(null);
+  // 选中的工具此刻的真实连接：进程在不在、实际连的是哪个本地代理端口。
+  // 配置写对了不代表生效了，所以这一步必须看进程，不看文件。
+  const [live, setLive] = useState(null);
   // 用户主动触发的动作（重启应用 / 写配置 / 测连通），走底部状态行
   const [executing, setExecuting] = useState(null);
   const [events, setEvents] = useState([]);
@@ -71,6 +72,27 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     });
   }, []);
 
+  /**
+   * 只刷新「选中工具的真实连接」。
+   * 采集整个状态要做 DNS 探测和目录扫描，很慢；写完配置后只需要这一小块。
+   */
+  const refreshLive = useCallback(async (id = appId) => {
+    const target = id ? findApp(id) : null;
+    if (!target) {
+      setLive(null);
+      return null;
+    }
+    try {
+      const conn = await appProxyPorts(target);
+      const next = { ...conn, verdict: proxyVerdict(conn) };
+      setLive(next);
+      return next;
+    } catch {
+      setLive(null);
+      return null;
+    }
+  }, [appId]);
+
   const refresh = useCallback(async () => {
     setBusy(true);
     setProgress("正在采集…");
@@ -85,22 +107,14 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         },
       });
       setState(next);
-      // Codex 客户端是否在跑、实际走哪个代理，刷新时一起更新
-      try {
-        const { codexDesktopRunning, codexDesktopProxyPorts } = await import("../core/apps.js");
-        const info = await codexDesktopRunning();
-        const { ports } = info.pids.length ? await codexDesktopProxyPorts() : { ports: [] };
-        setDesktop({ ...info, ports });
-      } catch {
-        setDesktop(null);
-      }
+      await refreshLive();
       log(`状态已更新（内网域名 ${next.internalDomains.length} 个）`, "ok");
     } catch (err) {
       log(`刷新失败：${err.message}`, "bad");
     }
     setBusy(false);
     setProgress("");
-  }, [internalDns, repoRoots, includeChrome, log]);
+  }, [internalDns, repoRoots, includeChrome, log, refreshLive]);
 
   const runFix = useCallback(async () => {
     log("开始诊断并生成修复方案…", "info");
@@ -424,6 +438,8 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         setActionIndex(0);
         setStep(2);
         setHint("");
+        // 进第 2 步就去看这个工具此刻的真实连接，别等用户问「到底生效没」
+        refreshLive(app.id);
       }
       return;
     }
@@ -470,8 +486,10 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
               : `正在以 tunless 代理重启 ${appName}…`,
         );
         applyAppAction(app, action.id)
-          .then((result) => {
+          .then(async (result) => {
             if (result) setStepResult(`✔ ${result}`);
+            // 刚写完配置/重启过，立刻重新看真实连接
+            await refreshLive();
           })
           .catch((err) => setHint(`操作失败：${err.message}`))
           .finally(() => {
@@ -529,7 +547,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       appId,
       result: stepResult,
       executing,
-      desktop,
+      live,
     });
   } else if (step === 3) {
     body = h(StepReach, { state, width, reachability: reach });

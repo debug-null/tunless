@@ -216,6 +216,58 @@ export async function codexDesktopRunning() {
 }
 
 /**
+ * 某个应用「实际」连的是哪个本地代理端口。
+ *
+ * 这是整个工具最该说真话的地方：配置写对了 ≠ 流量真的走了代理。
+ * 判断依据是进程的真实 TCP 连接，不是我们写了什么文件。
+ *
+ *  - Codex：网络在 app-server 子进程里，看 codex-cli 那些进程。
+ *  - Cursor / Antigravity：主进程是 Electron，Agent / language_server 是子进程，
+ *    所以要把整个进程树都扫一遍，不能只看主进程。
+ */
+export async function appProxyPorts(app) {
+  if (!app) return { pids: [], ports: [] };
+
+  const targets =
+    app.id === "codex"
+      ? ["codex-cli/CodexCLI.app/Contents/MacOS/codex"]
+      : [`${app.bundle}.app/Contents/MacOS/${app.bundle}`];
+
+  try {
+    const { stdout } = await exec("ps", ["-Ao", "pid=,command="], {
+      timeout: 8000,
+      maxBuffer: 32 * 1024 * 1024,
+    });
+    const pids = stdout
+      .split("\n")
+      .filter((line) => targets.some((t) => line.includes(t)))
+      .map((line) => Number(line.trim().split(/\s+/)[0]))
+      .filter((n) => Number.isFinite(n) && n > 0);
+
+    const ports = new Set();
+    for (const pid of pids) {
+      const found = await processProxyPort(pid);
+      for (const port of found ?? []) ports.add(port);
+    }
+    return { pids, ports: [...ports] };
+  } catch {
+    return { pids: [], ports: [] };
+  }
+}
+
+/**
+ * 判断「实际走没走 tunless」。
+ * 返回三种状态：ok（确实走 8899）/ stale（在走别的代理）/ not-running。
+ */
+export function proxyVerdict({ pids = [], ports = [] }, tunlessPort = 8899) {
+  if (!pids.length) return { state: "not-running", ports };
+  if (ports.includes(tunlessPort)) return { state: "ok", ports };
+  if (ports.length) return { state: "stale", ports };
+  // 进程在跑但此刻没有走代理的连接（可能只是还没发请求）
+  return { state: "unknown", ports };
+}
+
+/**
  * 桌面客户端的网络实际由它内部的 codex 子进程（app-server）负责。
  * 所以要看「客户端现在走哪个代理」，得看这些子进程的连接。
  */
@@ -451,13 +503,59 @@ export function applyCursorSettingsText(raw, changes) {
   return lines.join("\n");
 }
 
+/**
+ * 备份文件名里带原文件的完整路径（扁平化成 --），
+ * 这样 restore 才知道每份备份该还原到哪，
+ * 否则 `settings.json` 这种同名文件根本分不清是 Cursor 的还是 Antigravity 的。
+ */
+function encodePathForBackup(file) {
+  return path.resolve(file).replace(/^\//, "").replace(/[\/]/g, "--");
+}
+
 export function backupFile(file) {
   const dir = path.join(dataDir(), "backups");
   fs.mkdirSync(dir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const dest = path.join(dir, `${stamp}-${path.basename(file)}`);
+  const dest = path.join(dir, `${stamp}--${encodePathForBackup(file)}`);
   fs.copyFileSync(file, dest);
   return dest;
+}
+
+/**
+ * 列出现有备份，最新的在前。
+ *
+ * 旧版本备份名是 `<时间戳>-<文件名>`，没有原路径，还原不了；
+ * 这种标记成 legacy，界面上只说「来自旧版本」，不假装能还原。
+ */
+export function listBackups() {
+  const dir = path.join(dataDir(), "backups");
+  if (!fs.existsSync(dir)) return [];
+  return fs
+    .readdirSync(dir)
+    .map((name) => {
+      const full = path.join(dir, name);
+      const stat = fs.statSync(full);
+      if (stat.isDirectory()) return null;
+      const target = decodePathFromBackup(name);
+      return {
+        file: full,
+        name,
+        target,
+        legacy: !target,
+        mtime: stat.mtime,
+        size: stat.size,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.mtime - a.mtime);
+}
+
+/** 从备份文件名还原出原始路径（`Users--a--b--settings.json` → `/Users/a/b/settings.json`） */
+export function decodePathFromBackup(name) {
+  // 形如 2026-11-13T04-12-40-190Z--Users--x--.codex--.env
+  const m = /^\d{4}-\d{2}-\d{2}T[\d-]+Z--(.+)$/.exec(name);
+  if (!m) return null;
+  return `/${m[1].replace(/--/g, "/")}`;
 }
 
 function sleep(ms) {

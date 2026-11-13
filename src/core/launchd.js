@@ -19,7 +19,7 @@ function guiDomain() {
   return `gui/${process.getuid?.() ?? 501}`;
 }
 
-export function plistXml({ program, args, outLog, errLog, keepAlive = true }) {
+export function plistXml({ program, args, outLog, errLog, keepAlive = true, envPath = null }) {
   const esc = (value) =>
     String(value)
       .replace(/&/g, "&amp;")
@@ -39,6 +39,13 @@ ${[program, ...args].map((a) => `    <string>${esc(a)}</string>`).join("\n")}
   <true/>
   <key>KeepAlive</key>
   ${keepAlive ? "<true/>" : "<false/>"}
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>${esc(envPath ?? "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")}</string>
+  </dict>
   <key>StandardOutPath</key>
   <string>${esc(outLog)}</string>
   <key>StandardErrorPath</key>
@@ -84,15 +91,29 @@ export async function installService({ args = [], logDir = LOG_DIR } = {}) {
   fs.mkdirSync(logDir, { recursive: true });
   fs.mkdirSync(AGENT_DIR, { recursive: true });
 
-  // launchd starts jobs with a bare PATH, so the node binary has to be
-  // addressed by absolute path and the script passed as an argument.
+  // launchd 起进程时 PATH 是空的，所以 node 必须写绝对路径。
+  //
+  // 但这里有个坑：直接用 process.execPath 会把「当前那次」的 node 路径写死。
+  // 用 nvm 的话每次切版本路径都变，旧路径失效后 launchd 拉起来的进程直接报
+  // `env: node: No such file or directory`，服务看起来装着、其实早就死了。
+  //
+  // 所以把 node 的固定路径也带上：nvm 的 current 软链、homebrew 的稳定路径，
+  // 都写进 plist 的 PATH，这样即使 execPath 失效也还有机会找到 node。
   const program = process.execPath;
   const script = path.resolve(process.argv[1]);
+  const nodeDir = path.dirname(process.execPath);
+  const stableNodeDirs = [
+    nodeDir,
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    path.join(os.homedir(), ".nvm/current/bin"),
+  ].filter((dir, i, arr) => arr.indexOf(dir) === i);
   const xml = plistXml({
     program,
     args: [script, ...args],
     outLog: path.join(logDir, "proxy.log"),
     errLog: path.join(logDir, "proxy.err.log"),
+    envPath: [...stableNodeDirs, "/usr/bin", "/bin", "/usr/sbin", "/sbin"].join(":"),
   });
   fs.writeFileSync(PLIST_PATH, xml, "utf8");
 

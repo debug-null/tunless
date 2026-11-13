@@ -91,7 +91,7 @@ export function StepApps({ state, width, index }) {
 }
 
 /** 第 2 步：让它走代理 */
-export function StepLaunch({ state, width, index, appName, appId, result, executing, desktop }) {
+export function StepLaunch({ state, width, index, appName, appId, result, executing, live }) {
   const theme = useTheme();
   const side = state.sidecar;
   const rows = [];
@@ -134,7 +134,7 @@ export function StepLaunch({ state, width, index, appName, appId, result, execut
         : txt(`✔ ${app.name}：${why}`, { color: theme.colors.ok }),
     ]);
 
-    // Codex 的 .env 现在指向哪、客户端现在实际连哪，一眼可见
+    // 配置写的是什么，一眼可见
     if (app.id === "codex") {
       const state = codexProxyState(app);
       const onTunless = Boolean(state.httpsProxy?.includes(":8899"));
@@ -145,23 +145,23 @@ export function StepLaunch({ state, width, index, appName, appId, result, execut
           ? txt(state.httpsProxy, { color: onTunless ? theme.colors.ok : theme.colors.warn })
           : txt("没设置", { dim: true }),
       ]);
+    }
 
-      // 配置对了不等于生效：客户端启动时把 .env 读进内存，改完要重启。
-      if (desktop?.pids?.length) {
-        const live = desktop.ports ?? [];
-        const stale = live.length > 0 && !live.includes(8899);
-        rows.push([
-          txt("  "),
-          txt(padEnd("客户端实际", 12), { dim: true }),
-          stale
-            ? txt(`还连着 ${live.map((p) => `127.0.0.1:${p}`).join("、")}，需要重启客户端`, {
-                color: theme.colors.warn,
-              })
-            : live.length
-              ? txt(`已走 127.0.0.1:8899`, { color: theme.colors.ok })
-              : txt("没在跑", { dim: true }),
-        ]);
-      }
+    // 配置对了不等于生效，这里看的是进程的真实连接。
+    const verdict = live?.verdict;
+    if (verdict) {
+      const portText = (verdict.ports ?? []).map((p) => `127.0.0.1:${p}`).join("、");
+      rows.push([
+        txt("  "),
+        txt(padEnd("实际连接", 12), { dim: true }),
+        verdict.state === "ok"
+          ? txt("已走 127.0.0.1:8899", { color: theme.colors.ok })
+          : verdict.state === "stale"
+            ? txt(`还连着 ${portText}，需要重启`, { color: theme.colors.warn })
+            : verdict.state === "not-running"
+              ? txt("应用没在运行", { dim: true })
+              : txt("此刻没有代理连接（可能还没发请求）", { dim: true }),
+      ]);
     }
     rows.push([txt("  ")]);
   }

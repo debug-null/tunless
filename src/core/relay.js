@@ -201,15 +201,39 @@ export class HttpProxyServer {
     });
   }
 
+  /**
+   * 停止服务。
+   *
+   * 坑：net.Server.close() 只是「不再接受新连接」，
+   * 已建立的连接不关掉，close 的回调就永远不触发。
+   * 结果是一个挂着长连接的代理进程「停不下来」——
+   * 守护进程收到 SIGTERM 后卡死在这里，端口也不会释放，
+   * 表现为「关掉终端之后代理还在占着 8899，但新的连接进不来」。
+   *
+   * 所以这里要主动记住所有连接并逐个销毁。
+   */
   stop() {
     return new Promise((resolve) => {
       if (!this.server) return resolve();
+      for (const socket of this.sockets ?? []) {
+        try {
+          socket.destroy();
+        } catch {
+          // 已经断了
+        }
+      }
+      this.sockets?.clear();
       this.server.close(() => resolve());
+      // 兜底：即使还有连接没断干净，也别把进程吊死
+      setTimeout(resolve, 1000).unref?.();
     });
   }
 
   async handle(socket) {
     socket.setNoDelay(true);
+    this.sockets ??= new Set();
+    this.sockets.add(socket);
+    socket.once("close", () => this.sockets.delete(socket));
     readHead(socket, (text, rest) => {
       const head = parseHead(text);
       if (head.method === "CONNECT") {
@@ -367,15 +391,39 @@ export class Socks5Server {
     });
   }
 
+  /**
+   * 停止服务。
+   *
+   * 坑：net.Server.close() 只是「不再接受新连接」，
+   * 已建立的连接不关掉，close 的回调就永远不触发。
+   * 结果是一个挂着长连接的代理进程「停不下来」——
+   * 守护进程收到 SIGTERM 后卡死在这里，端口也不会释放，
+   * 表现为「关掉终端之后代理还在占着 8899，但新的连接进不来」。
+   *
+   * 所以这里要主动记住所有连接并逐个销毁。
+   */
   stop() {
     return new Promise((resolve) => {
       if (!this.server) return resolve();
+      for (const socket of this.sockets ?? []) {
+        try {
+          socket.destroy();
+        } catch {
+          // 已经断了
+        }
+      }
+      this.sockets?.clear();
       this.server.close(() => resolve());
+      // 兜底：即使还有连接没断干净，也别把进程吊死
+      setTimeout(resolve, 1000).unref?.();
     });
   }
 
   async handle(socket) {
     socket.setNoDelay(true);
+    this.sockets ??= new Set();
+    this.sockets.add(socket);
+    socket.once("close", () => this.sockets.delete(socket));
     const greeting = await readBytes(socket, 2);
     if (!greeting || greeting[0] !== 5) return socket.destroy();
     await readBytes(socket, greeting[1]);

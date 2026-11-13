@@ -56,3 +56,45 @@ test("没有规则时行为与原来一致", () => {
   assert.equal(decideRouteWithRules("github.com", { internalSuffixes: suffixes }), "upstream");
   assert.equal(decideRouteWithRules("github.com", { internalSuffixes: suffixes, rules: null }), "upstream");
 });
+
+// 回归：有活跃长连接时 stop() 必须能立刻返回。
+// 之前 net.Server.close() 的回调要等所有连接断开才触发，
+// 守护进程收到 SIGTERM 会卡死在这，端口不释放，
+// 表现就是「关了终端之后代理还在但连不上」。
+test("有活跃连接时 stop() 也能立刻停掉", async () => {
+  const net = await import("node:net");
+  const { HttpProxyServer } = await import("../src/core/relay.js");
+
+  const port = 18901;
+  const server = new HttpProxyServer({ port, log: () => {} });
+  await server.start();
+
+  // 建一条连接但不说完整请求头，模拟挂着的长连接
+  const held = net.connect(port, "127.0.0.1");
+  await new Promise((resolve) => held.once("connect", resolve));
+
+  const started = Date.now();
+  await Promise.race([
+    server.stop(),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("stop() 超过 2 秒还没返回，说明又被长连接吊住了")), 2000),
+    ),
+  ]);
+  const elapsed = Date.now() - started;
+
+  assert.ok(elapsed < 1000, `stop() 用了 ${elapsed}ms，太久`);
+
+  // 端口应该已经释放
+  await assert.rejects(
+    new Promise((resolve, reject) => {
+      const probe = net.connect(port, "127.0.0.1");
+      probe.once("connect", () => {
+        probe.destroy();
+        resolve();
+      });
+      probe.once("error", reject);
+    }),
+    "端口没释放，还能连上",
+  );
+  held.destroy();
+});

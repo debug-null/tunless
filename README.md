@@ -191,6 +191,7 @@ tunless fix             # 方案 → 预览差异 → 确认 → 应用 → 校�
 tunless proxy           # 启动本地转发代理，把代理能力交给工具
 tunless launch <应用>    # 带代理环境重启某个应用
 tunless service <操作>   # install | uninstall | status | logs
+tunless restore [序号]   # 列出 / 还原 tunless 改过的配置文件
 ```
 
 ### 图形界面
@@ -234,12 +235,17 @@ tunless service <操作>   # install | uninstall | status | logs
   （表现为「明明设了代理，日志里却还在连系统代理」）。
 
   客户端还有个坑：它在启动时就把 `.env` 读进内存，**改完必须重启客户端**才生效。
-  所以第 2 步会直接告诉你现在属于哪种情况：
+
+  这也是第 2 步必看「实际连接」的原因 —— **配置写对了不等于生效了**。
+  tunless 不看文件写了什么，而是看进程此刻真的连在哪个本地端口上：
 
   ```
   配置 .env   http://127.0.0.1:8899
-  客户端实际  还连着 127.0.0.1:7897，需要重启客户端
+  实际连接    还连着 127.0.0.1:7897，需要重启
   ```
+
+  四种结果：`已走 127.0.0.1:8899`（真的生效）、`还连着 …，需要重启`、
+  `应用没在运行`、`此刻没有代理连接（可能还没发请求）`。
 
 | 按键 | 作用 |
 | --- | --- |
@@ -342,6 +348,28 @@ tunless service install     # 开机自启，崩溃自动拉起
 tunless service status
 tunless service logs
 tunless service uninstall
+```
+
+`service install` 装的是 launchd 用户代理（`~/Library/LaunchAgents/dev.tunless.proxy.plist`），
+带 `KeepAlive` 与 `RunAtLoad`，进程的父进程是 launchd 而不是你的终端 ——
+**关掉终端、退出 SSH 都不影响**。plist 里还写了 `PATH`（含安装时的 node 目录、
+Homebrew 与系统路径），并设了 `ThrottleInterval`，避免 node 升级后出现
+`env: node: No such file or directory` 那种反复崩溃。
+
+升级 tunless 或换了 node 版本后，建议重装一次，让 plist 里的路径跟上：
+
+```bash
+tunless service uninstall && tunless service install
+```
+
+### 改过的配置怎么还原
+
+`tunless` 在写任何应用配置前都会先备份（`~/.tunless/backups/`）：
+
+```bash
+tunless restore          # 列出所有备份
+tunless restore 2        # 还原第 2 个（还原前会把当前内容再备份一次）
+tunless restore 2 --yes  # 脚本里用，跳过确认
 ```
 
 ### 用代理重启某个工具
