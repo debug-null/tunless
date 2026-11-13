@@ -19,6 +19,14 @@ export const MIHOMO_PARTY_DIR = path.join(
   "Library/Application Support/mihomo-party",
 );
 
+// wmsxwd：内核进程叫 AtlasCore（就是 mihomo），但配置是 GUI 通过 stdin
+// 喂进去的，磁盘上只有一份状态缓存。它有 REST 接口，却要 secret，
+// 而 secret 存在 Flutter 的加密存储里，读不出来。
+export const WMSXWD_DIR = path.join(
+  home,
+  "Library/Application Support/io.wmsxwd.app",
+);
+
 export function exists(p) {
   try {
     fs.accessSync(p);
@@ -160,6 +168,25 @@ export function discoverGeneric() {
   };
 }
 
+export function discoverWmsxwd() {
+  if (!exists(WMSXWD_DIR)) return null;
+  return {
+    id: "wmsxwd",
+    label: "wmsxwd",
+    home: WMSXWD_DIR,
+    // 运行时配置只在进程内存/stdin 里，没有磁盘文件可写，
+    // 所以 apiCandidates 只能指向我们能自己找到的控制器端口。
+    apiCandidates: [],
+    controllerPort: null,
+    secret: "",
+    mixedPort: null,
+    configFiles: [],
+    configFile: null,
+    runtimeOnly: true,
+    note: "配置由 GUI 在运行时注入，没有可写的磁盘配置",
+  };
+}
+
 export function looksLikeClashConfig(text) {
   if (!text || text.trim().length < 16) return false;
   return /^(mixed-port|port|socks-port|external-controller|proxies|proxy-groups|proxy-providers)\s*:/m.test(
@@ -171,6 +198,8 @@ export function discoverAll() {
   const found = [];
   const verge = discoverVerge();
   if (verge) found.push(verge);
+  const wmsxwd = discoverWmsxwd();
+  if (wmsxwd) found.push(wmsxwd);
   found.push(discoverGeneric());
   return found;
 }

@@ -15,6 +15,7 @@
 // 也支持只有 HTTP 的 Surge/Stash，和只有 SOCKS5 的 sing-box / v2ray。
 
 import net from "node:net";
+import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { execFile } from "node:child_process";
@@ -37,12 +38,41 @@ const KNOWN_PROCESSES = [
   { re: /stash/i, label: "Stash" },
   { re: /quantumult/i, label: "Quantumult" },
   { re: /loon/i, label: "Loon" },
+  // wmsxwd 的内核进程叫 AtlasCore，配置是 GUI 通过 stdin 喂进去的，
+  // 磁盘上只有一份状态缓存 —— 认不出进程名就没法告诉用户「你现在用的是谁」。
+  { re: /atlascore|wmsxwd/i, label: "wmsxwd" },
   { re: /privoxy|squid|tinyproxy/i, label: "本地代理" },
 ];
 
 export function labelForProcess(command) {
   const hit = KNOWN_PROCESSES.find((k) => k.re.test(command));
   return hit ? hit.label : null;
+}
+
+/**
+ * 当前正在用的客户端是谁。
+ *
+ * 判据只有一个：系统代理指向的那个端口，是哪个进程在监听。
+ * 「装在机器上」不等于「正在用」——很多人机器上同时留着好几个客户端，
+ * 只看安装目录会一直报旧的那个，用户看着就别扭。
+ */
+export async function detectActiveClient() {
+  try {
+    const sys = await systemProxyState();
+    if (!sys?.httpEnabled || !sys.port) return null;
+    const rows = await listeningPorts();
+    const row = rows.find((r) => r.port === Number(sys.port));
+    if (!row) return null;
+    const label = labelForProcess(row.process);
+    if (!label) return null;
+    let id = null;
+    if (/wmsxwd|atlascore/i.test(row.process)) id = "wmsxwd";
+    else if (/mihomo-party/i.test(row.process)) id = "generic-mihomo";
+    else if (/clash-verge|verge-mihomo/i.test(row.process)) id = "clash-verge-rev";
+    return { id, label, port: Number(sys.port), process: row.process };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -72,7 +102,14 @@ export async function detectClient() {
 
 /**
  * 解析 `lsof -nP -iTCP -sTCP:LISTEN` 的输出。
- * 只保留回环地址上的监听 —— 绑定到局域网的端口默认不当作代理候选。
+ *
+ * 端口在监听不等于它是代理，所以这里只负责把「可能是代理的监听端口」捞出来，
+ * 真假交给协议实测（probeProtocols）判断。
+ *
+ * 回环地址（127.0.0.1 / ::1）一律保留；通配绑定（*、0.0.0.0）也保留 ——
+ * wmsxwd 的 AtlasCore 就是 `*:6478`，之前被当成「局域网端口」丢掉，
+ * 结果只能靠系统代理那条路偶然认出来，用户一关系统代理就完全找不到它了。
+ * 通配绑定一律按 127.0.0.1 去连：IPv6 通配在 macOS 上同时接受 IPv4 连接。
  */
 export function parseListening(output, { commands = new Map() } = {}) {
   const rows = [];
@@ -90,12 +127,15 @@ export function parseListening(output, { commands = new Map() } = {}) {
     const host = m[1].replace(/^\[|\]$/g, "");
     const port = Number(m[2]);
     if (!Number.isFinite(port) || port <= 0) continue;
-    if (!(host === "127.0.0.1" || host === "::1" || host === "localhost")) continue;
+    const wildcard = host === "*" || host === "0.0.0.0" || host === "::";
+    if (!wildcard && !(host === "127.0.0.1" || host === "::1" || host === "localhost")) continue;
     rows.push({
       host: "127.0.0.1",
       port,
       pid: Number.isFinite(pid) ? pid : null,
       process: commands.get(pid) ?? command,
+      wildcard,
+      bound: host,
     });
   }
   return rows;
@@ -156,9 +196,14 @@ export function probeSocks5(host, port, timeoutMs = 1200) {
   return new Promise((resolve) => {
     const socket = net.connect({ host, port });
     let settled = false;
+    // 硬超时：光靠 socket 的空闲超时不够。有些服务（ssh 端口）会先吐一段
+    // 自己的 banner，之后就一直安静地挂着 —— 那时 socket 不算「空闲」，
+    // 探测就会永远挂住，整个发现流程卡死。
+    const timer = setTimeout(() => done(false), timeoutMs);
     const done = (value) => {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
       socket.destroy();
       resolve(value);
     };
@@ -169,6 +214,8 @@ export function probeSocks5(host, port, timeoutMs = 1200) {
     socket.on("data", (chunk) => {
       buf = Buffer.concat([buf, chunk]);
       if (buf.length < 2) return;
+      // 回的不是 SOCKS5 握手（比如 ssh banner）—— 这不是 SOCKS 端口。
+      if (buf[0] !== 5) return done(false);
       done(buf[0] === 5 && (buf[1] === 0 || buf[1] === 2));
     });
   });
@@ -178,9 +225,11 @@ export function probeHttp(host, port, timeoutMs = 1200) {
   return new Promise((resolve) => {
     const socket = net.connect({ host, port });
     let settled = false;
+    const timer = setTimeout(() => done(false), timeoutMs);
     const done = (value) => {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
       socket.destroy();
       resolve(value);
     };
@@ -203,15 +252,18 @@ export function probeHttp(host, port, timeoutMs = 1200) {
       // 回了一段不是 HTTP 的东西（SSH banner、TLS 握手），就是别的服务。
       if (line.length >= 4 && !line.startsWith("HTTP/")) return done(false);
       if (!m) return;
-      // 代理对一条无法完成的 CONNECT 会回 200 / 403 / 407 / 502 之类；
+      // 代理对一条无法完成的 CONNECT 会回 200 / 407 / 502 之类；
       // 普通 web 服务器收到 CONNECT 通常回 400 / 404 / 405 / 501。
       // 不区分的话，Clash Verge GUI 自己的本地 web 端口（回 404）也会被认成代理。
+      //
+      // 403 不算：macOS 的 AirPlay 接收端（7000 / 5000）对任何 CONNECT 都回
+      // 403 Forbidden，会被误认成代理 —— 这两个端口是系统自带的，谁都躲不掉。
       done(PROXY_CONNECT_STATUSES.has(Number(m[1])), false);
     });
   });
 }
 
-const PROXY_CONNECT_STATUSES = new Set([200, 403, 407, 502, 503, 504]);
+const PROXY_CONNECT_STATUSES = new Set([200, 407, 502, 503, 504]);
 
 /** 用真实目标验证这个上游能不能出网；失败只代表「现在出不去」，不代表不是代理 */
 export async function verifyUpstream(upstream, { target = "github.com", timeoutMs = 6000 } = {}) {
@@ -389,6 +441,124 @@ export function describeCandidate(c) {
   return `${c.host}:${c.port} ${c.label ?? ""}（${proto}）`.trim();
 }
 
+/**
+ * 判断「你钉住的上游」是不是已经过期。
+ *
+ * 真实踩过的坑：用户把客户端从 Clash Verge 换成 wmsxwd。旧客户端是 root
+ * 常驻服务，进程还在后台、端口还在监听 —— 于是「钉住的值」依然是活的，
+ * 但流量其实被送回了旧客户端。用户以为已经切换，其实一点没切。
+ *
+ * 判据：系统代理开着、指向另一个端口，而且那个端口确实是代理。
+ * 这时候以系统代理为准 —— 它代表「用户当前正在用的客户端」。
+ */
+export async function detectPinnedDrift({
+  pinned,
+  excludePorts = [8899, 8898],
+  timeoutMs = 1200,
+  systemProxy = undefined,
+  probe = null,
+} = {}) {
+  if (!pinned) return { stale: false };
+  const sys = systemProxy ?? (await systemProxyCandidates());
+  const other = sys.find(
+    (c) =>
+      Number(c.port) !== Number(pinned.port) && !excludePorts.includes(Number(c.port)),
+  );
+  if (!other) return { stale: false };
+
+  const protocols = probe
+    ? await probe(other.host, other.port, timeoutMs)
+    : await probeProtocols(other.host, other.port, timeoutMs);
+  if (!protocols.length) return { stale: false };
+
+  // 新版钉住值会记下「当时系统代理指向哪儿」。用户可能就是故意钉一个
+  // 跟系统代理不一样的端口（比如公司专线），这种情况必须尊重用户选择。
+  if (pinned.systemProxyPort !== null && pinned.systemProxyPort !== undefined) {
+    if (Number(pinned.systemProxyPort) === Number(other.port)) {
+      // 钉住时系统代理就已经是这个端口 —— 用户是故意的，不算漂移。
+      return { stale: false };
+    }
+  }
+
+  const row = (await listeningPorts()).find((r) => r.port === Number(other.port));
+  const label = row ? labelForProcess(row.process) : null;
+  return {
+    stale: true,
+    replacement: {
+      host: other.host,
+      port: Number(other.port),
+      protocols,
+      source: "system-proxy",
+      label: label ?? "系统代理",
+    },
+    reason:
+      `你固定的 ${pinned.host}:${pinned.port} 还是旧客户端在用，` +
+      `系统代理已经切到 ${other.host}:${other.port}${label ? `（${label}）` : ""}`,
+  };
+}
+
+/**
+ * 找出本机的 mihomo REST 控制器端口。
+ *
+ * wmsxwd 这类客户端把配置放在运行时（GUI 通过 stdin 注入），磁盘上的
+ * config.yaml 只是一份状态缓存，里面写的 external-controller 根本没在监听。
+ * 只能靠「哪个监听端口会用 mihomo 的口吻回话」反推：
+ * 正确 secret → 200 {"version":...}；secret 不对 → 401 Unauthorized。
+ */
+export async function detectControllerPorts({ timeoutMs = 900 } = {}) {
+  const rows = await listeningPorts();
+  const hits = [];
+  await Promise.all(
+    rows.map(async (row) => {
+      const hit = await probeVersionEndpoint(row.host, row.port, timeoutMs);
+      if (hit) hits.push({ ...row, ...hit });
+    }),
+  );
+  return hits.sort((a, b) => a.port - b.port);
+}
+
+function probeVersionEndpoint(host, port, timeoutMs) {
+  return new Promise((resolve) => {
+    const req = http.request(
+      { host, port, path: "/version", method: "GET", timeout: timeoutMs },
+      (res) => {
+        const chunks = [];
+        res.on("data", (c) => chunks.push(c));
+        res.on("end", () => {
+          const text = Buffer.concat(chunks).toString("utf8");
+          // 401 + Unauthorized：mihomo 认出来了，只是缺 secret；
+          // 200 里带 version 字段：secret 正确。
+          // 必须贴着 mihomo 的原样回话（{"message":"Unauthorized"}）来判断 ——
+          // Electron 之类的前端口也会回 401 unauthorized，认错了会把一堆
+          // 无关端口当成内核控制器。
+          const unauthorized =
+            res.statusCode === 401 && /"message"\s*:\s*"Unauthorized"/i.test(text);
+          let ok = false;
+          if (res.statusCode === 200) {
+            try {
+              ok = typeof JSON.parse(text)?.version === "string";
+            } catch {
+              ok = false;
+            }
+          }
+          if (!unauthorized && !ok) return resolve(null);
+          resolve({
+            status: res.statusCode,
+            needsSecret: unauthorized,
+            version: ok ? text.slice(0, 120) : null,
+          });
+        });
+      },
+    );
+    req.on("timeout", () => {
+      req.destroy();
+      resolve(null);
+    });
+    req.on("error", () => resolve(null));
+    req.end();
+  });
+}
+
 // ---- 用户手动指定的上游 ----
 //
 // 自动探测会失败：客户端可能绑在非回环地址、可能只在 TUN 下开放端口、
@@ -406,17 +576,31 @@ export function loadPinnedUpstream() {
     const data = JSON.parse(raw);
     const port = Number(data.port);
     if (!Number.isFinite(port) || port <= 0) return null;
-    return { host: data.host || "127.0.0.1", port, label: "手动指定", pinned: true };
+    return {
+      host: data.host || "127.0.0.1",
+      port,
+      label: "手动指定",
+      pinned: true,
+      // 钉住那一刻的系统代理端口，用来判断「用户是不是换了客户端」。
+      // 老版本没有这个字段，一律当作「可能是过期钉住」。
+      systemProxyPort: Number.isFinite(Number(data.systemProxyPort))
+        ? Number(data.systemProxyPort)
+        : null,
+    };
   } catch {
     return null;
   }
 }
 
-export function savePinnedUpstream({ host = "127.0.0.1", port }) {
+export function savePinnedUpstream({ host = "127.0.0.1", port, systemProxyPort = null }) {
   fs.mkdirSync(dataDir(), { recursive: true });
   fs.writeFileSync(
     upstreamFile(),
-    `${JSON.stringify({ host, port: Number(port) }, null, 2)}\n`,
+    `${JSON.stringify(
+      { host, port: Number(port), systemProxyPort: systemProxyPort === null ? null : Number(systemProxyPort) },
+      null,
+      2,
+    )}\n`,
     "utf8",
   );
   return upstreamFile();

@@ -12,10 +12,13 @@ import {
   verifyUpstream,
   describeCandidate,
   detectClient,
+  detectActiveClient,
+  detectControllerPorts,
   loadPinnedUpstream,
   savePinnedUpstream,
   clearPinnedUpstream,
   parseUpstream,
+  detectPinnedDrift,
 } from "./core/upstream.js";
 import { classifyDomain } from "./core/dns.js";
 import { dataDir } from "./core/paths.js";
@@ -177,6 +180,14 @@ async function pickFrontend(flags) {
     if (!found) throw new Error(`未知客户端：${explicit}`);
     return found;
   }
+  // 「装在机器上」不等于「正在用」。用户经常同时留着好几个客户端，
+  // 只看目录会一直报旧的那个。以系统代理当前指向的端口为准 ——
+  // 那个端口属于谁，就是用户正在用的客户端。
+  const owner = await detectActiveClient();
+  if (owner) {
+    const match = frontends.find((f) => f.id === owner.id);
+    if (match) return match;
+  }
   for (const f of frontends) {
     if (f.id === "clash-verge-rev" && fs.existsSync(f.home)) return f;
   }
@@ -210,6 +221,21 @@ export async function resolveUpstream(args = {}) {
       m.probeProtocols(pinned.host, pinned.port),
     );
     if (protocols.length) {
+      // 端口还活着，但可能已经属于旧客户端了。用户换了客户端、系统代理
+      // 指向了新的端口，这时继续用钉住的值 = 流量被悄悄送回旧客户端。
+      const drift = await detectPinnedDrift({ pinned });
+      if (drift.stale) {
+        return {
+          upstream: {
+            host: drift.replacement.host,
+            port: drift.replacement.port,
+            protocols: drift.replacement.protocols,
+          },
+          source: "pinned-stale",
+          detail: `${drift.reason}，已改用 ${drift.replacement.host}:${drift.replacement.port}`,
+          pinnedStale: { host: pinned.host, port: pinned.port, replacement: drift.replacement },
+        };
+      }
       return {
         upstream: { ...pinned, protocols },
         source: "pinned",
@@ -347,23 +373,44 @@ export async function cmdDoctor(args) {
   // 认出来了但改不了它的配置，比假装支持要诚实。
   const canEditConfig = frontend.id === "clash-verge-rev" || Boolean(frontend.configFile);
   if (!canEditConfig) {
-    say(dim("    不是 mihomo 系：能转发代理，但改不了它的 DNS 分流"));
+    say(
+      dim(
+        frontend.runtimeOnly
+          ? "    配置由 GUI 在运行时注入，没有可写的磁盘配置：能转发代理，但改不了它的 DNS 分流"
+          : "    不是 mihomo 系：能转发代理，但改不了它的 DNS 分流",
+      ),
+    );
   }
 
   let api = null;
-  try {
-    const conn = await connect(frontend);
-    api = conn.api;
-    say(`  ${ok(`内核接口可达（${conn.api.descriptor}）`)}`);
-    say(dim(`    版本：${conn.info.version}`));
-  } catch (err) {
-    exitCode = 1;
-    say(`  ${bad("内核接口不可达")}`);
-    for (const f of err.failures ?? []) {
-      say(dim(`    ${f.candidate.socketPath ? `unix://${f.candidate.socketPath}` : `http://${f.candidate.host}:${f.candidate.port}`}: ${f.error}`));
+  if (frontend.runtimeOnly) {
+    // wmsxwd 这类客户端：接口在跑，但需要 secret（存在加密存储里，读不出来）。
+    const controllers = await detectControllerPorts();
+    for (const c of controllers) {
+      say(`  ${info(`内核 REST 控制器：127.0.0.1:${c.port}`)}`);
+      if (c.needsSecret) {
+        say(dim("    需要 secret，tunless 读不到（存在客户端的加密存储里）"));
+        say(dim("    → 只影响「改 DNS 分流」，不影响转发代理"));
+      }
     }
-    say(dim("    这不影响转发：上游代理是按协议实测出来的，不依赖这个接口"));
-    say(dim("    若确实没认出你的代理，运行 tunless upstream set 127.0.0.1:<端口>"));
+    if (!controllers.length) {
+      say(dim("    没找到内核的 REST 控制器（不影响转发）"));
+    }
+  } else {
+    try {
+      const conn = await connect(frontend);
+      api = conn.api;
+      say(`  ${ok(`内核接口可达（${conn.api.descriptor}）`)}`);
+      say(dim(`    版本：${conn.info.version}`));
+    } catch (err) {
+      exitCode = 1;
+      say(`  ${bad("内核接口不可达")}`);
+      for (const f of err.failures ?? []) {
+        say(dim(`    ${f.candidate.socketPath ? `unix://${f.candidate.socketPath}` : `http://${f.candidate.host}:${f.candidate.port}`}: ${f.error}`));
+      }
+      say(dim("    这不影响转发：上游代理是按协议实测出来的，不依赖这个接口"));
+      say(dim("    若确实没认出你的代理，运行 tunless upstream set 127.0.0.1:<端口>"));
+    }
   }
 
   if (api) {
@@ -537,7 +584,7 @@ export async function cmdProxy(args) {
     say();
     return 1;
   }
-  const upstream = {
+  let upstream = {
     host: resolved.upstream.host,
     port: resolved.upstream.port,
     protocols: resolved.upstream.protocols ?? ["http", "socks5"],
@@ -629,8 +676,36 @@ export async function cmdProxy(args) {
 
   say(head("\n  正在监听 — 按 Ctrl+C 停止。\n"));
 
+  // 上游热更新。转发服务是常驻的，用户随时可能换客户端
+  // （Clash Verge → wmsxwd），端口也会跟着变。抱着旧端口不放 =
+  // 流量悄悄走回旧客户端，而且界面上完全看不出来。
+  const refresh = setInterval(async () => {
+    try {
+      const again = await resolveUpstream({ flags: {} });
+      if (!again.upstream) return;
+      if (
+        again.upstream.host === upstream.host &&
+        again.upstream.port === upstream.port
+      ) {
+        return;
+      }
+      upstream = {
+        host: again.upstream.host,
+        port: again.upstream.port,
+        protocols: again.upstream.protocols ?? ["http", "socks5"],
+      };
+      httpServer.upstream = upstream;
+      if (socksServer) socksServer.upstream = upstream;
+      log(`上游已切换到 ${upstream.host}:${upstream.port}（${again.detail}）`);
+    } catch {
+      // 探测失败就保持现状，别把正在用的连接弄断
+    }
+  }, 30_000);
+  refresh.unref?.();
+
   const shutdown = async () => {
     say(dim("\n  正在停止…"));
+    clearInterval(refresh);
     await httpServer.stop();
     if (socksServer) await socksServer.stop();
     process.exit(0);
@@ -1090,7 +1165,13 @@ export async function cmdUpstream(args) {
       say(`  ${warn(`${parsed.host}:${parsed.port} 上没有认出代理协议`)}`);
       say(dim("    仍然会保存。如果是 TUN 下才开放的端口，开着 TUN 再试一次"));
     }
-    const file = savePinnedUpstream(parsed);
+    // 记下「此刻系统代理指向哪个端口」：以后系统代理变了，就知道
+    // 用户是换了客户端，还是自己又换回了这个端口。
+    const sys = await systemProxyState();
+    const file = savePinnedUpstream({
+      ...parsed,
+      systemProxyPort: sys?.httpEnabled && sys.port ? Number(sys.port) : null,
+    });
     say(`\n  ${ok(`已指定上游代理 ${parsed.host}:${parsed.port}`)}`);
     if (protocols.length) say(dim(`    识别为 ${protocols.join(" + ")}`));
     say(dim(`    保存于 ${file}`));
@@ -1121,6 +1202,10 @@ export async function cmdUpstream(args) {
   const resolved = await resolveUpstream({ flags: {} });
   if (resolved.upstream) {
     say(`  ${info(`实际使用：${resolved.upstream.host}:${resolved.upstream.port}`)} ${dim(`（${resolved.detail}）`)}`);
+    if (resolved.pinnedStale) {
+      say(`  ${warn(`你固定的 ${resolved.pinnedStale.host}:${resolved.pinnedStale.port} 已经不是你现在的客户端了`)}`);
+      say(dim("    已自动改用系统代理指向的端口。要固定下来：tunless upstream set <新端口>"));
+    }
     if (resolved.pinnedMissing) {
       say(`  ${warn(`你固定的 ${resolved.pinnedMissing.host}:${resolved.pinnedMissing.port} 现在没有代理`)}`);
       say(dim("    已临时回落到自动探测。要更新固定值：tunless upstream set <新端口>"));
@@ -1367,7 +1452,12 @@ export async function cmdFix(args) {
   // 那等于让用户白等一场，还以为工具快成功了。
   if (frontend.id !== "clash-verge-rev" && !frontend.configFile) {
     say(`  ${bad("没有找到可写的代理内核配置")}`);
-    say(dim("    这一步只对 mihomo 系客户端有效（Clash Verge / ClashX Meta / mihomo-party）"));
+    if (frontend.runtimeOnly) {
+      say(dim(`    ${frontend.label} 的配置由 GUI 在运行时注入，磁盘上没有能改的配置文件`));
+      say(dim("    DNS 分流请在客户端里自己加内网域名；转发代理不受影响"));
+    } else {
+      say(dim("    这一步只对 mihomo 系客户端有效（Clash Verge / ClashX Meta / mihomo-party）"));
+    }
     say(dim("    你的客户端还能用 tunless proxy：转发照常工作，只是 DNS 分流得在客户端里自己配"));
     say();
     return 1;

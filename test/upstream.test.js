@@ -9,7 +9,7 @@ import {
   verifyUpstream,
 } from "../src/core/upstream.js";
 
-test("parseListening 只保留回环地址上的监听端口", () => {
+test("parseListening 保留回环与通配绑定，丢掉局域网地址", () => {
   const lsof = [
     "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME",
     "mihomo 1234 apple 5u IPv4 0x1 0t0 TCP 127.0.0.1:7897 (LISTEN)",
@@ -25,10 +25,16 @@ test("parseListening 只保留回环地址上的监听端口", () => {
   });
   assert.deepEqual(
     rows.map((r) => r.port),
-    [7897, 1080],
+    // *:8080 现在会保留：wmsxwd 的 AtlasCore 就是 *:6478，
+    // 当成「局域网端口」丢掉的话，用户一关系统代理就再也认不出它。
+    // 是不是代理交给后面的协议实测判断。
+    [7897, 8080, 1080],
   );
   assert.equal(rows[0].process.includes("Clash Verge"), true);
   assert.equal(rows[1].host, "127.0.0.1");
+  assert.equal(rows[1].wildcard, true);
+  assert.equal(rows[1].bound, "*");
+  assert.equal(rows[2].wildcard, false);
 });
 
 test("parseUpstream 接受 host:port 与裸端口", () => {
@@ -158,4 +164,122 @@ test("looksLikeClashConfig 不会把客户端 UI 设置当成内核配置", asyn
 
   const kernel = ["mixed-port: 7890", "external-controller: 127.0.0.1:9090"].join("\n");
   assert.equal(looksLikeClashConfig(kernel), true);
+});
+
+test("labelForProcess 认得 wmsxwd 的 AtlasCore 内核", () => {
+  assert.equal(
+    labelForProcess("/Applications/wmsxwd.app/Contents/Resources/AtlasCore_arm64"),
+    "wmsxwd",
+  );
+  assert.equal(
+    labelForProcess("/Library/Application Support/clash-verge-service/cores/verge-mihomo"),
+    "Clash Verge Rev",
+  );
+});
+
+test("detectPinnedDrift：端口还活着但客户端换了，要认出来", async () => {
+  const { detectPinnedDrift } = await import("../src/core/upstream.js");
+  const pinned = { host: "127.0.0.1", port: 7897 };
+  const systemProxy = [{ host: "127.0.0.1", port: 6478, label: "系统代理" }];
+
+  const drift = await detectPinnedDrift({
+    pinned,
+    systemProxy,
+    probe: async () => ["socks5", "http"],
+  });
+  assert.equal(drift.stale, true);
+  assert.equal(drift.replacement.port, 6478);
+  assert.match(drift.reason, /7897/);
+  assert.match(drift.reason, /6478/);
+});
+
+test("detectPinnedDrift：固定的端口就是系统代理时不算漂移", async () => {
+  const { detectPinnedDrift } = await import("../src/core/upstream.js");
+  const drift = await detectPinnedDrift({
+    pinned: { host: "127.0.0.1", port: 6478 },
+    systemProxy: [{ host: "127.0.0.1", port: 6478 }],
+    probe: async () => ["socks5", "http"],
+  });
+  assert.equal(drift.stale, false);
+});
+
+test("detectPinnedDrift：系统代理指向的端口不是代理时不算漂移", async () => {
+  const { detectPinnedDrift } = await import("../src/core/upstream.js");
+  const drift = await detectPinnedDrift({
+    pinned: { host: "127.0.0.1", port: 7897 },
+    systemProxy: [{ host: "127.0.0.1", port: 8080 }],
+    probe: async () => [],
+  });
+  assert.equal(drift.stale, false);
+});
+
+test("detectPinnedDrift：钉住时系统代理就是现在这个端口 → 用户是故意的，不动它", async () => {
+  const { detectPinnedDrift } = await import("../src/core/upstream.js");
+  const drift = await detectPinnedDrift({
+    // 用户明知道系统代理在 6478，却故意钉了 7897
+    pinned: { host: "127.0.0.1", port: 7897, systemProxyPort: 6478 },
+    systemProxy: [{ host: "127.0.0.1", port: 6478 }],
+    probe: async () => ["socks5", "http"],
+  });
+  assert.equal(drift.stale, false);
+});
+
+test("detectPinnedDrift：钉住之后系统代理换端口 → 算过期", async () => {
+  const { detectPinnedDrift } = await import("../src/core/upstream.js");
+  const drift = await detectPinnedDrift({
+    pinned: { host: "127.0.0.1", port: 7897, systemProxyPort: 7897 },
+    systemProxy: [{ host: "127.0.0.1", port: 6478 }],
+    probe: async () => ["socks5", "http"],
+  });
+  assert.equal(drift.stale, true);
+  assert.equal(drift.replacement.port, 6478);
+});
+
+test("probeHttp 不把 403 的本地服务当成代理（AirPlay 7000/5000 就是这样）", async () => {
+  const server = net.createServer((socket) => {
+    socket.on("data", () => {
+      socket.write("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nServer: AirTunes/1005\r\n\r\n");
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const port = server.address().port;
+  try {
+    assert.deepEqual(await probeProtocols("127.0.0.1", port, 800), []);
+  } finally {
+    server.close();
+  }
+});
+
+test("probeHttp 认得回 200 Connection established 的代理", async () => {
+  const server = net.createServer((socket) => {
+    socket.on("data", () => {
+      socket.write("HTTP/1.1 200 Connection established\r\n\r\n");
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const port = server.address().port;
+  try {
+    assert.deepEqual(await probeProtocols("127.0.0.1", port, 800), ["http"]);
+  } finally {
+    server.close();
+  }
+});
+
+test("probeSocks5 遇到只吐 banner 的服务不会卡死", async () => {
+  // ssh 端口就是这种：先吐一段自己的 banner，然后一直安静地挂着。
+  // 光靠 socket 的空闲超时收不了尾，探测会永远挂着。
+  const server = net.createServer((socket) => {
+    socket.write("SSH-2.0-OpenSSH_9.0\r\n");
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const port = server.address().port;
+  try {
+    const result = await Promise.race([
+      probeProtocols("127.0.0.1", port, 400),
+      new Promise((r) => setTimeout(() => r(["TIMEOUT"]), 3000)),
+    ]);
+    assert.deepEqual(result, []);
+  } finally {
+    server.close();
+  }
 });

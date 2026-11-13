@@ -445,7 +445,15 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
 
       // 真正生效要落盘：常驻服务是 launchd 拉起来的，拿不到当前界面的选择。
       try {
-        savePinnedUpstream({ host: upstream.host, port: upstream.port });
+        // 记下此刻系统代理的端口：以后系统代理变了，能分清
+        // 「用户换了客户端」还是「用户自己又选回了这个端口」。
+        const sys = state.systemProxy;
+        savePinnedUpstream({
+          host: upstream.host,
+          port: upstream.port,
+          systemProxyPort:
+            sys && sys.httpEnabled && sys.port ? Number(sys.port) : null,
+        });
         log(`上游代理已固定为 ${upstream.host}:${upstream.port}`, "ok");
       } catch (err) {
         log(`保存上游代理失败：${err.message}`, "warn");

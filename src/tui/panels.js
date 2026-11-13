@@ -105,7 +105,8 @@ export function OverviewPanel({ state, width, appName = null, reachability = nul
       "上游代理",
       upstreamState,
       upstream.chosen
-        ? `${upstream.chosen.host}:${upstream.chosen.port} · 按 2 更换`
+        ? `${upstream.chosen.host}:${upstream.chosen.port}` +
+          (upstream.drift ? ` · 已过期，改用当前客户端 · 按 2 更换` : " · 按 2 更换")
         : "按 2 选一个代理端口，探不到就手动填",
     ),
   );

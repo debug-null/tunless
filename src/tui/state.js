@@ -7,6 +7,8 @@ import {
   loadPinnedUpstream,
   describeCandidate,
   detectClient,
+  detectPinnedDrift,
+  detectActiveClient,
 } from "../core/upstream.js";
 import { probeApi } from "../core/api.js";
 import { classifyDomain } from "../core/dns.js";
@@ -59,6 +61,7 @@ export function emptyState() {
       chosen: null,
       candidates: [],
       detail: "",
+      drift: null,
     },
     sidecar: {
       running: false,
@@ -104,15 +107,22 @@ export async function collectState({
   };
 
   const frontends = discoverAll();
-  const verge = frontends.find((f) => f.id === "clash-verge-rev" && f.home);
-  const frontend = verge ?? frontends[frontends.length - 1];
+  // 以「系统代理当前指向的端口」为准判断用户正在用哪个客户端：
+  // 机器上装着好几个客户端时，只看目录会一直显示旧的那个。
+  const active = await detectActiveClient();
+  const frontend =
+    (active ? frontends.find((f) => f.id === active.id) : null) ??
+    frontends.find((f) => f.id === "clash-verge-rev" && f.home) ??
+    frontends[frontends.length - 1];
   // 用户可能用 Surge / Stash —— 这些客户端没有可读的 mihomo 配置，
   // 但进程名能认出来，界面就别再显示「Generic mihomo」了。
   // 只有「没认出是哪个 mihomo 系」时才用进程名兜底，避免把 Verge 的
   // merge 文件能力显示成别的客户端。
   const detected = await detectClient();
   state.frontend =
-    detected && frontend.id !== "clash-verge-rev"
+    active
+      ? { ...frontend, label: active.label, detected: true }
+      : detected && frontend.id !== "clash-verge-rev"
       ? { ...frontend, label: detected.label, detected: true }
       : frontend;
 
@@ -151,17 +161,32 @@ export async function collectState({
     // 会让人以为「我选的没生效」，然后反复重选。
     const pinned = state.upstream.pinned;
     if (pinned) {
-      const match = state.upstream.candidates.find(
-        (c) => c.port === pinned.port && c.host === pinned.host,
-      );
-      state.upstream.chosen = {
-        host: pinned.host,
-        port: pinned.port,
-        protocols: match?.protocols ?? ["http", "socks5"],
-      };
-      state.upstream.detail = match
-        ? `${describeCandidate(match)}（已固定）`
-        : `手动固定 ${pinned.host}:${pinned.port}`;
+      // 端口还活着不代表它还是你现在的客户端。用户换了客户端以后，
+      // 旧客户端的端口往往还在监听（它是常驻服务），这时候必须看漂移。
+      const drift = await detectPinnedDrift({ pinned });
+      if (drift.stale) {
+        state.upstream.chosen = {
+          host: drift.replacement.host,
+          port: drift.replacement.port,
+          protocols: drift.replacement.protocols,
+        };
+        state.upstream.drift = drift.reason;
+        state.upstream.detail =
+          `${drift.replacement.host}:${drift.replacement.port}` +
+          `${drift.replacement.label ? ` · ${drift.replacement.label}` : ""}（你固定的 ${pinned.port} 已过期）`;
+      } else {
+        const match = state.upstream.candidates.find(
+          (c) => c.port === pinned.port && c.host === pinned.host,
+        );
+        state.upstream.chosen = {
+          host: pinned.host,
+          port: pinned.port,
+          protocols: match?.protocols ?? ["http", "socks5"],
+        };
+        state.upstream.detail = match
+          ? `${describeCandidate(match)}（已固定）`
+          : `手动固定 ${pinned.host}:${pinned.port}`;
+      }
     } else {
       state.upstream.chosen = found.upstream;
       state.upstream.detail = found.chosen ? describeCandidate(found.chosen) : "";
