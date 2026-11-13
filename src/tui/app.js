@@ -19,6 +19,7 @@ import {
   StepReach,
   StepDomains,
   StepDone,
+  StatusLine,
   TOTAL_STEPS,
 } from "./steps.js";
 import { HelpPanel } from "./help.js";
@@ -29,12 +30,6 @@ import { markSeen } from "./first-run.js";
 import { collectState, emptyState } from "./state.js";
 import { startService, stopService } from "../core/launchd.js";
 import { checkReachability } from "../core/reach.js";
-
-const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
-function unicodeSpinner(tick) {
-  return SPINNER_FRAMES[tick % SPINNER_FRAMES.length];
-}
 
 export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const { exit } = useApp();
@@ -54,9 +49,8 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const [stepResult, setStepResult] = useState(null);
   // 第 3 步：连通性实测结果
   const [reach, setReach] = useState(null);
-  // 正在执行的动作（重启应用 / 写配置 / 测连通），显示在显眼的状态行里
+  // 用户主动触发的动作（重启应用 / 写配置 / 测连通），走底部状态行
   const [executing, setExecuting] = useState(null);
-  const [spinnerTick, setSpinnerTick] = useState(0);
   const [events, setEvents] = useState([]);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState("");
@@ -221,12 +215,10 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
 
   /** 第 3 步：真的发一个请求走一遍代理 */
   const runReach = useCallback(async () => {
-    setBusy(true);
-    setProgress("正在实测外网…");
+    setExecuting("正在实测外网…");
     const result = await checkReachability({ port: state.sidecar.httpPort });
     setReach(result);
-    setProgress("");
-    setBusy(false);
+    setExecuting(null);
     log(
       result.ok ? `连通性正常 — ${result.detail}` : `连通性有问题 — ${result.detail}`,
       result.ok ? "ok" : "bad",
@@ -238,13 +230,6 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     refresh();
     markSeen();
   }, [refresh]);
-
-  // 有任务在跑时，让状态行的转圈动起来。
-  useEffect(() => {
-    if (!busy && !executing) return undefined;
-    const timer = setInterval(() => setSpinnerTick((n) => n + 1), 160);
-    return () => clearInterval(timer);
-  }, [busy, executing]);
 
   /** 规则列表（供删除使用） */
   const flatRules = useCallback(() => {
@@ -436,7 +421,11 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         const action = actionsFor(appId)[actionIndex];
         if (!action) return;
         setBusy(true);
-        setExecuting(`正在以 tunless 代理重启 ${appName}…`);
+        setExecuting(
+          action.id === "settings"
+            ? `正在写入 ${appName} 的代理配置…`
+            : `正在以 tunless 代理重启 ${appName}…`,
+        );
         applyAppAction(app, action.id)
           .then((result) => {
             if (result) setStepResult(`✔ ${result}`);
@@ -504,23 +493,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     body = h(StepDomains, { state, width });
   }
 
-  // 状态行：任务在跑的时候必须有明显提示，不能只藏在右上角。
-  const SPINNER = unicodeSpinner(spinnerTick);
-  const busyText = executing ?? progress ?? "";
-  const statusLeft = busy
-    ? h(
-        Text,
-        { color: theme.colors.accent, bold: true },
-        `${SPINNER} ${busyText || "正在处理…"}`,
-      )
-    : null;
-  const statusRight = state.updatedAt
-    ? h(
-        Text,
-        { dimColor: true },
-        `更新于 ${state.updatedAt.toLocaleTimeString("zh-CN", { hour12: false })}`,
-      )
-    : null;
+  // 状态行放底部：用户看的是「我现在该按什么」，状态也该在那一带。
 
   const help = h(
     Text,
@@ -536,19 +509,17 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       { flexDirection: "row", justifyContent: "space-between" },
       h(Text, { color: theme.colors.accent, bold: true }, " tunless "),
       h(Text, { dimColor: true }, "给连不上外网的 agent 一个本地代理口，不用开 TUN"),
-      statusRight,
-    ),
-    h(
-      Box,
-      { flexDirection: "row", justifyContent: "space-between" },
-      statusLeft ?? h(Text, { dimColor: true }, " "),
-      h(Text, { dimColor: true }, " "),
     ),
     h(
       Box,
       { flexDirection: "column", flexGrow: 1, overflow: "hidden" },
       body,
     ),
+    h(StatusLine, {
+      executing,
+      progress: busy ? progress : null,
+      updatedAt: state.updatedAt,
+    }),
     h(Box, { flexDirection: "column" }, help, h(Text, { dimColor: true }, " ")),
   );
 }

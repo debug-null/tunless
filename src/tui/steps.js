@@ -261,3 +261,33 @@ export function StepDone({ state, width, appName, reachability }) {
     h(Card, { title: "结果", width: Math.max(56, Math.min(width - 2, 110)), rows }),
   );
 }
+
+/**
+ * 底部状态行。
+ *
+ * 放在底部、不放右上角，也不做转圈动画：
+ * 转圈意味着每 100 多毫秒重画整屏，肉眼就是闪；
+ * 而后台自动采集更不该用「正在执行」的语气，那会让人以为是自己触发的。
+ */
+export function StatusLine({ executing, progress, updatedAt }) {
+  const theme = useTheme();
+  const left = executing
+    ? txt(`⟳ ${executing}`, { color: theme.colors.accent, bold: true })
+    : progress
+      ? txt(
+          `正在${String(progress).replace(/^正在/, "").replace(/…+$/, "")}…（后台自动进行）`,
+          { dim: true },
+        )
+      : txt(" ");
+
+  const right = updatedAt
+    ? txt(`更新于 ${updatedAt.toLocaleTimeString("zh-CN", { hour12: false })}`, { dim: true })
+    : txt(" ");
+
+  return h(
+    Box,
+    { flexDirection: "row", justifyContent: "space-between" },
+    h(Text, null, ...segments([left], "s")),
+    h(Text, null, ...segments([right], "r")),
+  );
+}

@@ -12,7 +12,7 @@ import {
   charWidth,
 } from "../src/tui/width.js";
 import { OverviewPanel } from "../src/tui/panels.js";
-import { StepApps, StepLaunch, StepReach, StepDomains, StepDone } from "../src/tui/steps.js";
+import { StepApps, StepLaunch, StepReach, StepDomains, StepDone, StatusLine } from "../src/tui/steps.js";
 import { RulesPanel, MorePanel } from "../src/tui/rules-panel.js";
 import { Card, kv, txt, ThemeProvider } from "../src/tui/ui.js";
 import { getTheme, detectUnicode, symbolSet, borderSet } from "../src/tui/theme.js";
@@ -365,4 +365,25 @@ test("向导第 4 步列出内网域名，收尾页给出结果", async () => {
   );
   assert.match(done, /全部搞定/);
   assert.match(done, /Cursor/);
+});
+
+test("状态行：用户触发的动作高亮显示，后台采集用安静的措辞", async () => {
+  const running = await shot(
+    h(
+      Box,
+      { flexDirection: "column", width: 120 },
+      h(StatusLine, { executing: "正在以 tunless 代理重启 Cursor…", progress: null, updatedAt: null }),
+    ),
+  );
+  assert.match(running, /⟳ 正在以 tunless 代理重启 Cursor/);
+
+  const background = await shot(
+    h(
+      Box,
+      { flexDirection: "column", width: 120 },
+      h(StatusLine, { executing: null, progress: "正在扫描域名…", updatedAt: null }),
+    ),
+  );
+  assert.match(background, /后台自动进行/);
+  assert.doesNotMatch(background, /⟳/);
 });
