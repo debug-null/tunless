@@ -29,7 +29,7 @@ test("服务停了：bad + 行内动作按 s", () => {
   const st = { ...base, sidecar: { ...base.sidecar, running: false } };
   const row = byId(rowsFor(st), "service");
   assert.equal(row.status, "bad");
-  assert.match(row.action, /s/);
+  assert.match(row.action, /按 s/);
   assert.equal(verdictFor(st).tone, "bad");
 });
 
@@ -63,7 +63,7 @@ test("内网 DNS 死：warn；假 IP：bad + 按 f", () => {
   const fake = { ...base, fakeCount: 2 };
   const row = byId(rowsFor(fake), "internal");
   assert.equal(row.status, "bad");
-  assert.match(row.action, /f/);
+  assert.match(row.action, /按 f/);
 });
 
 test("待生效后缀：warn 并给数字", () => {

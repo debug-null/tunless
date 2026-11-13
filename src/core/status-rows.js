@@ -27,7 +27,9 @@ function upstreamRow(state) {
   if (state?.loading) return row("upstream", "unknown", "探测中");
   if (u.chosen) {
     const addr = `${u.chosen.host}:${u.chosen.port}`;
-    if (u.drift) return row("upstream", "warn", `${addr}（你固定的已过期）`, "按 u 确认");
+    // drift 本身就是完整原因句（「你固定的 A 还是旧客户端在用，系统代理
+    // 已经切到 B」），两个端口号都在里面。
+    if (u.drift) return row("upstream", "warn", u.drift, "按 u 确认");
     const tag = u.detail ? ` · ${u.detail}` : "";
     return row("upstream", "ok", `${addr}${tag}`);
   }
@@ -55,10 +57,11 @@ function toolsRow(state) {
 
 function internalRow(state) {
   if (state?.loading) return row("internal", "unknown", "探测中");
-  if (state.dnsAlive === false)
-    return row("internal", "warn", `内网 DNS ${state.internalDns ?? ""} 不可达`);
-  if ((state.fakeCount ?? 0) > 0)
-    return row("internal", "bad", `${state.fakeCount} 个内网后缀仍是假 IP`, "按 f 修复");
+  // bad 先判：手拼状态喂进来时，重症不能被轻症（DNS 死的 warn）盖掉。
+  if ((state?.fakeCount ?? 0) > 0)
+    return row("internal", "bad", `${state?.fakeCount} 个内网后缀仍是假 IP`, "按 f 修复");
+  if (state?.dnsAlive === false)
+    return row("internal", "warn", `内网 DNS ${state?.internalDns ?? ""} 不可达`);
   const s = state?.sidecar ?? {};
   const active = s.activeSuffixes?.length ?? 0;
   const pending = s.pendingSuffixes?.length ?? 0;
