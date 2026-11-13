@@ -1,8 +1,8 @@
 // TUI 主程序：基于 ink 的图形界面。
 //
-// 交互是「向导式」的：一次只做一件事，回车走完这一步再进下一步。
-//   1 选工具 → 2 用代理启动 → 3 测连通 → 4 内网域名 → 完成
-// 之前是一屏四步 + 数字键跳转，跳转本身就让人晕。
+// 结构是「仪表盘为家 + 按键钻取」：平时停在一屏四行的仪表盘上，
+// 按 g 进五步向导（选工具 → 选上游 → 用代理启动 → 测连通 → 内网域名），
+// 走完回车回家，第 1 步按 Esc 也回家。
 //
 // 主题：启动时用 OSC 11 询问终端背景色，按亮暗切换配色；
 // 终端不支持 Unicode 时符号与边框降级成 ASCII。
@@ -24,6 +24,9 @@ import {
   TOTAL_STEPS,
 } from "./steps.js";
 import { HelpPanel } from "./help.js";
+import { Dashboard } from "./screens/dashboard.js";
+import { KeyBar } from "./components/key-bar.js";
+import { EventFeed } from "./components/event-feed.js";
 import { actionsFor } from "./app-menu.js";
 import {
   APPS,
@@ -47,6 +50,7 @@ import {
   parseUpstream,
   savePinnedUpstream,
 } from "../core/upstream.js";
+import { ROW_ORDER } from "../core/status-rows.js";
 
 export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const { exit } = useApp();
@@ -54,9 +58,14 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const theme = useTheme();
 
   const [state, setState] = useState(emptyState);
-  // 向导状态：step 是当前第几步，done 是收尾页。
-  const [step, setStep] = useState(1);
-  const [done, setDone] = useState(false);
+  // 屏幕路由：dashboard 是家，wizard 是五步向导。
+  // service/upstream/apps/domains 钻取屏后续版本再落，键位先不占。
+  const [screen, setScreen] = useState("dashboard");
+  // 仪表盘高亮行（0..ROW_ORDER.length-1），钻取屏进来前先当选择器养着
+  const [rowIndex, setRowIndex] = useState(0);
+  // 向导内部状态：wizardStep 是当前第几步，wizardDone 是收尾页。
+  const [wizardStep, setWizardStep] = useState(1);
+  const [wizardDone, setWizardDone] = useState(false);
   // 第 1 步选中的应用
   const [appIndex, setAppIndex] = useState(0);
   const [appName, setAppName] = useState(null);
@@ -471,7 +480,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         }
       }
 
-      setStep(3);
+      setWizardStep(3);
       setHint("");
       setActionIndex(0);
       log(`上游代理：${upstream.host}:${upstream.port} — 能出网`, "ok");
@@ -514,23 +523,16 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     latest.current = { refresh, runReach, refreshLive, log };
   });
 
-  // 首次进入自动采集一次。采集完如果一切已就绪（服务在跑、上游已定、
-  // 有应用真的在走代理），直接落到结果页，不用一步步回车 —
-  // 想重新走向导在结果页回车就行。
+  // 首次进入自动采集一次。什么都没配过（服务没装、上游没选也没固定）
+  // 就直接进向导带着走一遍；其余情况永远落仪表盘 —— 它是家。
   useEffect(() => {
     Promise.resolve(latest.current.refresh?.()).then((next) => {
-      // 采集要好几秒，用户可能已经先手选了工具 —— 别把人拽走。
+      // 采集要好几秒，用户可能已经先动手了 —— 别把人拽走。
       if (!next || appIdRef.current) return;
-      const readyApp = (next.apps ?? []).find(
-        (a) => a.installed && a.proxied === "ok",
-      );
-      if (!next.sidecar?.running || !next.upstream?.chosen || !readyApp) return;
-      setAppId(readyApp.id);
-      setAppName(readyApp.name);
-      setDone(true);
-      latest.current.log?.(`${readyApp.name} 已在走代理，一切就绪 — 回车可重回向导`, "ok");
-      latest.current.refreshLive?.(readyApp.id);
-      latest.current.runReach?.(readyApp.id);
+      if (!next.upstream?.pinned && !next.sidecar?.installed && !next.upstream?.chosen) {
+        setScreen("wizard");
+        latest.current.log?.("看起来是第一次配置，进向导", "info");
+      }
     });
     markSeen();
   }, []);
@@ -668,6 +670,29 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       return;
     }
 
+    // 手动填写上游端口：所有按键进输入框（原本住在向导第 2 步里，
+    // 提到这层守卫后，将来的上游屏也能复用同一套输入逻辑）。
+    if (editingUpstream) {
+      if (key.escape) {
+        setEditingUpstream(false);
+        setDraftUpstream("");
+        setVerifyResult(null);
+        return;
+      }
+      if (key.return) {
+        confirmUpstream(draftUpstream);
+        return;
+      }
+      if (key.backspace || key.delete) {
+        setDraftUpstream((v) => v.slice(0, -1));
+        return;
+      }
+      if (input && !key.ctrl && !key.meta) {
+        setDraftUpstream((v) => v + input);
+      }
+      return;
+    }
+
     if (helpOpen) {
       if (key.escape || input === "h" || input === "?" || key.return) {
         setHelpOpen(false);
@@ -691,7 +716,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       return;
     }
     if (input === "r") {
-      if (step === 4 && !done) {
+      if (screen === "wizard" && wizardStep === 4 && !wizardDone) {
         runReach();
       } else {
         refresh();
@@ -702,24 +727,51 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       runFix();
       return;
     }
-    if (input === "S") {
+    if (input === "s" || input === "S") {
       runService();
       return;
     }
 
-    // ---- 向导：每一步只处理自己该处理的东西 --------------------------
-    if (done) {
-      if (key.return) {
-        setDone(false);
-        setStep(1);
+    // ---- 仪表盘：↑↓ 只是行高亮（钻取屏后续再接回车），g 进向导 ----------
+    if (screen === "dashboard") {
+      if (input === "g") {
+        setScreen("wizard");
+        setWizardStep(1);
+        setWizardDone(false);
         setStepResult(null);
         setReach(null);
+        setHint("");
+        return;
+      }
+      if (key.upArrow || input === "k") {
+        setRowIndex((i) => Math.max(0, i - 1));
+        return;
+      }
+      if (key.downArrow || input === "j") {
+        setRowIndex((i) => Math.min(ROW_ORDER.length - 1, i + 1));
+        return;
       }
       return;
     }
 
-    if (step === 1) {
+    // ---- 向导：每一步只处理自己该处理的东西 --------------------------
+    if (screen !== "wizard") return; // 还没有的屏：按键一律不响应
+    if (wizardDone) {
+      if (key.return) {
+        // 向导已经完成使命：回仪表盘，不再原地重开。
+        setScreen("dashboard");
+        setWizardDone(false);
+      }
+      return;
+    }
+
+    if (wizardStep === 1) {
       const installed = (state.apps ?? []).filter((a) => a.installed);
+      if (key.escape) {
+        // 现在有家可回：第 1 步 Esc 直接回仪表盘
+        setScreen("dashboard");
+        return;
+      }
       if (key.upArrow) {
         setAppIndex((i) => Math.max(0, i - 1));
         return;
@@ -742,7 +794,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         // 列表已经按「这个应用能不能用」过滤过了，
         // 第一项就是能用的那种方式，光标落在它上面。
         setActionIndex(0);
-        setStep(2);
+        setWizardStep(2);
         setHint("");
         // 探测出来的第一个候选就是默认选中项，用户直接回车即可
         setUpstreamIndex(0);
@@ -751,30 +803,10 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       return;
     }
 
-    if (step === 2) {
+    if (wizardStep === 2) {
       // ---- 选上游代理：先确定「代理谁」，再谈怎么启动 ----------------
-      if (editingUpstream) {
-        if (key.escape) {
-          setEditingUpstream(false);
-          setDraftUpstream("");
-          setVerifyResult(null);
-          return;
-        }
-        if (key.return) {
-          confirmUpstream(draftUpstream);
-          return;
-        }
-        if (key.backspace || key.delete) {
-          setDraftUpstream((v) => v.slice(0, -1));
-          return;
-        }
-        if (input && !key.ctrl && !key.meta) {
-          setDraftUpstream((v) => v + input);
-        }
-        return;
-      }
       if (key.escape) {
-        setStep(1);
+        setWizardStep(1);
         setVerifyResult(null);
         return;
       }
@@ -812,9 +844,9 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       return;
     }
 
-    if (step === 3) {
+    if (wizardStep === 3) {
       if (key.escape) {
-        setStep(2);
+        setWizardStep(2);
         setStepResult(null);
         return;
       }
@@ -831,7 +863,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         if (stepResult) {
           // 这一步做完了，等用户自己回车才进下一步
           setStepResult(null);
-          setStep(4);
+          setWizardStep(4);
           setHint("");
           runReach();
           return;
@@ -891,7 +923,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       return;
     }
 
-    if (step === 4) {
+    if (wizardStep === 4) {
       if (input === "t") {
         setEditingTarget(true);
         setDraftTarget("");
@@ -899,24 +931,24 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         return;
       }
       if (key.escape) {
-        setStep(3);
+        setWizardStep(3);
         setReach(null);
         return;
       }
       if (key.return) {
-        setStep(5);
+        setWizardStep(5);
         setHint("");
       }
       return;
     }
 
-    if (step === 5) {
+    if (wizardStep === 5) {
       if (key.escape) {
-        setStep(4);
+        setWizardStep(4);
         return;
       }
       if (key.return) {
-        setDone(true);
+        setWizardDone(true);
         setHint("");
       }
       if (input === "d") {
@@ -931,11 +963,13 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   let body;
   if (helpOpen) {
     body = h(HelpPanel, { width });
-  } else if (done) {
+  } else if (screen === "dashboard") {
+    body = h(Dashboard, { state, rowIndex, width, events });
+  } else if (wizardDone) {
     body = h(StepDone, { state, width, appName, reachability: reach });
-  } else if (step === 1) {
+  } else if (wizardStep === 1) {
     body = h(StepApps, { state, width, index: appIndex });
-  } else if (step === 2) {
+  } else if (wizardStep === 2) {
     body = h(StepUpstream, {
       state,
       width,
@@ -946,7 +980,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       verifying,
       verifyResult,
     });
-  } else if (step === 3) {
+  } else if (wizardStep === 3) {
     body = h(StepLaunch, {
       state,
       width,
@@ -957,7 +991,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       executing,
       live,
     });
-  } else if (step === 4) {
+  } else if (wizardStep === 4) {
     body = h(StepReach, {
       state,
       width,
@@ -980,27 +1014,21 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         ? "回车保存 · Esc 取消"
         : editingUpstream
           ? "回车确认 · Esc 取消"
-          : step === 2 && !done
+          : wizardStep === 2 && !wizardDone
             ? "↑↓ 选代理 · 回车确认 · m 手动填 · q 退出"
-            : step === 4 && !done
+            : wizardStep === 4 && !wizardDone
               ? "r 重测 · t 加一个要测的域名 · 回车下一步"
               : helpOpen
                 ? "Esc 返回"
                 : "h 看用法 · a 手写内网域名 · r 刷新 · q 退出"),
   );
 
-  // 最近几条事件：重启服务、写规则、报错原因这些本来只存在于
-  // log() 调用的信息 —— 之前 events 收集了却从不渲染，
-  // 用户只能看到一条一闪而过的 hint。
-  const KIND_COLOR = { ok: theme.colors.ok, warn: theme.colors.warn, bad: theme.colors.bad };
-  const eventLines = events.slice(-3).map((e) =>
-    h(
-      Text,
-      { key: `${e.time}-${e.text}` },
-      h(Text, { dimColor: true }, `  ${e.time} `),
-      h(Text, { color: KIND_COLOR[e.kind] ?? theme.colors.text, dimColor: e.kind === "info" }, e.text),
-    ),
-  );
+  // 最近几条事件走 EventFeed 组件。仪表盘自己在正文里就带了一份事件流，
+  // 底部再给向导屏留一份；仪表盘底栏换成固定的 KeyBar，
+  // hint（修复/启停的结果）有值时在 KeyBar 上方露一行，别只进事件流。
+  // 帮助打开时始终走 help 文案 —— HelpPanel 自己不写「Esc 返回」。
+  const footer =
+    screen === "dashboard" && !helpOpen ? h(KeyBar, { keys: DASHBOARD_KEYS }) : help;
 
   return h(
     Box,
@@ -1021,9 +1049,29 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       progress: busy ? progress : null,
       updatedAt: state.updatedAt,
     }),
-    h(Box, { flexDirection: "column" }, ...eventLines, help, h(Text, { dimColor: true }, " ")),
+    h(
+      Box,
+      { flexDirection: "column" },
+      screen === "dashboard"
+        ? hint
+          ? h(Text, { dimColor: true }, ` ${hint}`)
+          : null
+        : h(EventFeed, { events, limit: 3 }),
+      footer,
+      h(Text, { dimColor: true }, " "),
+    ),
   );
 }
+
+// 仪表盘底栏按键：只列现在真能用的（d/u/l 等钻取屏落了再补）
+const DASHBOARD_KEYS = [
+  ["↑↓", "选择"],
+  ["g", "向导"],
+  ["s", "启停"],
+  ["f", "修复"],
+  ["r", "刷新"],
+  ["q", "退出"],
+];
 
 /**
  * 启动图形界面。

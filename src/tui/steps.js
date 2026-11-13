@@ -537,7 +537,7 @@ export function StepDone({ state, width, appName, reachability }) {
         : txt("没测", { dim: true }),
     ],
     [txt("  ")],
-    [txt("  "), txt("回车重新开始 · q 退出", { dim: true })],
+    [txt("  "), txt("回车回到仪表盘 · q 退出", { dim: true })],
   ];
 
   return h(
