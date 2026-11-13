@@ -28,6 +28,7 @@ import {
 } from "./core/upstream.js";
 import { classifyDomain, probeServer, resolve4System } from "./core/dns.js";
 import { dataDir, writeRuntime, clearRuntime } from "./core/paths.js";
+import { createReporter } from "./cli/report.js";
 import { scanAll } from "./core/scan.js";
 import { inspectProcesses, proxyAdvice } from "./core/proc.js";
 import {
@@ -436,23 +437,24 @@ export async function cmdScan(args) {
 export async function cmdDoctor(args) {
   const internalDns = await resolveInternalDns(args.flags["internal-dns"], DEFAULT_INTERNAL_DNS);
   let exitCode = 0;
+  // 渲染走 report.js：判词形状与 TUI 仪表盘同宗，
+  // out 注入 say 保住 quiet/captured 机制。
+  const rep = createReporter({ out: say });
 
-  say(head("\n── 环境 ──"));
+  rep.section("环境");
   const frontend = await pickFrontend(args);
   // 只在「没认出 mihomo 系配置」时才用进程名兜底，
   // 否则会把 Verge 的 merge 文件能力说成别的客户端。
   const detected = frontend.id === "clash-verge-rev" ? null : await detectClient();
   const clientLabel = detected?.label ?? frontend.label;
-  say(`  ${info(`客户端：${clientLabel}`)}`);
+  rep.line(info(`客户端：${clientLabel}`));
   // 认出来了但改不了它的配置，比假装支持要诚实。
   const canEditConfig = frontend.id === "clash-verge-rev" || Boolean(frontend.configFile);
   if (!canEditConfig) {
-    say(
-      dim(
-        frontend.runtimeOnly
-          ? "    配置由 GUI 在运行时注入，没有可写的磁盘配置：能转发代理，但改不了它的 DNS 分流"
-          : "    不是 mihomo 系：能转发代理，但改不了它的 DNS 分流",
-      ),
+    rep.dim(
+      frontend.runtimeOnly
+        ? "配置由 GUI 在运行时注入，没有可写的磁盘配置：能转发代理，但改不了它的 DNS 分流"
+        : "不是 mihomo 系：能转发代理，但改不了它的 DNS 分流",
     );
   }
 
@@ -461,29 +463,29 @@ export async function cmdDoctor(args) {
     // wmsxwd 这类客户端：接口在跑，但需要 secret（存在加密存储里，读不出来）。
     const controllers = await detectControllerPorts();
     for (const c of controllers) {
-      say(`  ${info(`内核 REST 控制器：127.0.0.1:${c.port}`)}`);
+      rep.line(info(`内核 REST 控制器：127.0.0.1:${c.port}`));
       if (c.needsSecret) {
-        say(dim("    需要 secret，tunless 读不到（存在客户端的加密存储里）"));
-        say(dim("    → 只影响「改 DNS 分流」，不影响转发代理"));
+        rep.dim("需要 secret，tunless 读不到（存在客户端的加密存储里）");
+        rep.suggest("只影响「改 DNS 分流」，不影响转发代理");
       }
     }
     if (!controllers.length) {
-      say(dim("    没找到内核的 REST 控制器（不影响转发）"));
+      rep.dim("没找到内核的 REST 控制器（不影响转发）");
     }
   } else {
     try {
       const conn = await connect(frontend);
       api = conn.api;
-      say(`  ${ok(`内核接口可达（${conn.api.descriptor}）`)}`);
-      say(dim(`    版本：${conn.info.version}`));
+      rep.row("ok", "内核接口", `可达（${conn.api.descriptor}）`);
+      rep.dim(`版本：${conn.info.version}`);
     } catch (err) {
       exitCode = 1;
-      say(`  ${bad("内核接口不可达")}`);
+      rep.row("bad", "内核接口", "不可达");
       for (const f of err.failures ?? []) {
-        say(dim(`    ${f.candidate.socketPath ? `unix://${f.candidate.socketPath}` : `http://${f.candidate.host}:${f.candidate.port}`}: ${f.error}`));
+        rep.dim(`${f.candidate.socketPath ? `unix://${f.candidate.socketPath}` : `http://${f.candidate.host}:${f.candidate.port}`}: ${f.error}`);
       }
-      say(dim("    这不影响转发：上游代理是按协议实测出来的，不依赖这个接口"));
-      say(dim("    若确实没认出你的代理，运行 tunless upstream set 127.0.0.1:<端口>"));
+      rep.dim("这不影响转发：上游代理是按协议实测出来的，不依赖这个接口");
+      rep.suggest("若确实没认出你的代理，运行 tunless upstream set 127.0.0.1:<端口>");
     }
   }
 
@@ -491,45 +493,55 @@ export async function cmdDoctor(args) {
     try {
       const cfg = await api.configs();
       const tun = cfg.tun?.enable;
-      say(`  ${tun ? ok("TUN mode enabled") : warn("TUN mode disabled")}`);
+      rep.row(tun ? "ok" : "warn", "TUN mode", tun ? "enabled" : "disabled");
       if (!tun) {
-        say(dim("    programs that read HTTPS_PROXY/ALL_PROXY are covered by: tunless proxy"));
-        say(dim("    programs that ignore the proxy entirely need TUN mode"));
+        rep.dim("programs that read HTTPS_PROXY/ALL_PROXY are covered by: tunless proxy");
+        rep.dim("programs that ignore the proxy entirely need TUN mode");
       }
       const mode = cfg.mode;
-      say(`  ${info(`分流模式：${mode}`)}`);
+      rep.line(info(`分流模式：${mode}`));
     } catch (err) {
       exitCode = 1;
-      say(`  ${bad(`读取内核配置失败：${err.message}`)}`);
+      rep.row("bad", "内核配置", `读取失败：${err.message}`);
     }
   }
 
   const sysProxy = await systemProxyState();
   if (sysProxy) {
     const enabled = sysProxy.httpEnabled && sysProxy.httpsEnabled;
-    say(`  ${enabled ? ok("系统代理已启用") : warn("系统代理未启用")} ${dim(`${sysProxy.host}:${sysProxy.port}`)}`);
+    rep.row(
+      enabled ? "ok" : "warn",
+      "系统代理",
+      `${enabled ? "已启用" : "未启用"} ${sysProxy.host}:${sysProxy.port}`,
+    );
   }
 
   if (frontend.id === "clash-verge-rev") {
-    say(`  ${frontend.mergeFile ? ok("已找到 merge 增强文件") : warn("没有 merge 增强文件")}`);
-    if (frontend.mergeFile) say(dim(`    ${frontend.mergeFile}`));
-    say(`  ${frontend.tunEnabled ? ok("客户端 TUN 开关已开启") : warn("客户端 TUN 开关已关闭")}`);
+    rep.row(frontend.mergeFile ? "ok" : "warn", "merge 文件", frontend.mergeFile ? "已找到" : "没有");
+    if (frontend.mergeFile) rep.dim(frontend.mergeFile);
+    rep.row(frontend.tunEnabled ? "ok" : "warn", "客户端 TUN", frontend.tunEnabled ? "已开启" : "已关闭");
   }
 
   // 上游探测与客户端无关：Surge / Stash / ClashX / sing-box 都走这里。
-  say(head("\n── 上游代理 ──"));
+  rep.section("上游代理");
   const resolved = await resolveUpstream(args);
   if (resolved.upstream) {
     const { host, port } = resolved.upstream;
-    say(`  ${ok(`${host}:${port}`)} ${dim(`（${resolved.detail}）`)}`);
+    // detail 里常常自带地址（「手动指定 127.0.0.1:6478」），剥掉再拼，别显示两遍。
+    const why = String(resolved.detail ?? "")
+      .replace(`${host}:${port}`, "")
+      .trim()
+      .replace(/^[（(]+|[）)]+$/g, "")
+      .trim();
+    rep.row("ok", "上游", `${host}:${port}${why ? `（${why}）` : ""}`);
     const check = await verifyUpstream(resolved.upstream);
-    say(`  ${check.ok ? ok("能出网") : warn("此刻出不了网")} ${dim(check.detail)}`);
+    rep.row(check.ok ? "ok" : "warn", "连通性", `${check.ok ? "能出网" : "此刻出不了网"}${check.detail ? ` · ${check.detail}` : ""}`);
   } else {
     exitCode = 1;
-    say(`  ${bad("没有找到可用的上游代理")}`);
-    say(dim(`    ${resolved.detail}`));
+    rep.row("bad", "上游", "没有找到可用的上游代理");
+    rep.dim(resolved.detail);
     for (const c of (resolved.candidates ?? []).slice(0, 8)) {
-      say(dim(`    候选 ${describeCandidate(c)}`));
+      rep.dim(`候选 ${describeCandidate(c)}`);
     }
   }
 
@@ -557,9 +569,9 @@ export async function cmdDoctor(args) {
     })(),
   ]);
 
-  say(head("\n── 程序代理能力 ──"));
+  rep.section("程序代理能力");
   if (!procs.length) {
-    say(dim("  未发现相关进程"));
+    rep.dim("未发现相关进程");
   }
   // 只展示有结论的 + 前几个未知的 —— Electron 应用本来就查不出符号，
   // 全列出来是几十行噪音。
@@ -573,49 +585,49 @@ export async function cmdDoctor(args) {
         : p.status === "unsupported"
           ? warn("不支持代理环境变量")
           : dim("代理能力未知");
-    say(`  ${String(p.pid).padEnd(7)} ${p.comm.slice(0, 52).padEnd(52)} ${badge}`);
-    if (p.status === "unsupported") say(dim(`      ${proxyAdvice(p)}`));
+    rep.line(`${String(p.pid).padEnd(7)} ${p.comm.slice(0, 52).padEnd(52)} ${badge}`);
+    if (p.status === "unsupported") rep.dim(`  ${proxyAdvice(p)}`);
   }
   if (procs.length > shown.length) {
-    say(dim(`  …… 还有 ${procs.length - shown.length} 个进程无法判定（Electron 应用读不到符号，属正常）`));
+    rep.dim(`…… 还有 ${procs.length - shown.length} 个进程无法判定（Electron 应用读不到符号，属正常）`);
   }
 
   // 「配置写了」不等于「现在真的在用」。这里只看能确凿观察到的连接，
   // 读不到就说读不到 —— 不拿环境变量推测定罪。
-  say(head("\n── 进程实际代理 ──"));
+  rep.section("进程实际代理");
   for (const app of APPS) {
     if (app.id === "codex") continue;
     // 「在不在跑」看主进程；「联不联网」看子进程 —— 分开判，
     // 之前混在 networkPid 一个结果上，Cursor 被误报成「没在运行」。
     const running = await mainPid(app);
     if (!running) {
-      say(`  ${app.name.padEnd(14)} ${dim("没在运行")}`);
+      rep.line(`${app.name.padEnd(14)} ${dim("没在运行")}`);
       continue;
     }
     const pid = await networkPid(app);
     const env = await processProxyEnv(pid);
     if (env?.hasProxy) {
-      say(`  ${app.name.padEnd(14)} ${ok(env.httpsProxy)} ${dim(`(pid ${pid})`)}`);
+      rep.line(`${app.name.padEnd(14)} ${ok(env.httpsProxy)} ${dim(`(pid ${pid})`)}`);
     } else if (env === null) {
-      say(`  ${app.name.padEnd(14)} ${dim("读不到该进程的连接信息")}`);
+      rep.line(`${app.name.padEnd(14)} ${dim("读不到该进程的连接信息")}`);
     } else {
-      say(`  ${app.name.padEnd(14)} ${warn("此刻没有代理连接")} ${dim(`(pid ${pid})`)}`);
-      say(dim(`      可能还没发请求；如果它一直连不上外网，试 tunless launch ${app.name}`));
+      rep.line(`${app.name.padEnd(14)} ${warn("此刻没有代理连接")} ${dim(`(pid ${pid})`)}`);
+      rep.suggest(`可能还没发请求；如果它一直连不上外网，试 tunless launch ${app.name}`);
     }
   }
 
-  say(head("\n── 转发服务 ──"));
-  say(`  ${info("tunless proxy 让工具无需 TUN 也能走代理")}`);
-  say(dim("    tunless proxy            # HTTP 8899 / SOCKS5 8898"));
-  say(dim("    export HTTPS_PROXY=http://127.0.0.1:8899"));
+  rep.section("转发服务");
+  rep.line(info("tunless proxy 让工具无需 TUN 也能走代理"));
+  rep.dim("tunless proxy            # HTTP 8899 / SOCKS5 8898");
+  rep.dim("export HTTPS_PROXY=http://127.0.0.1:8899");
 
-  say(head("\n── 内网域名 ──"));
+  rep.section("内网域名");
   if (!domainScan.alive) {
-    say(`  ${warn(`内网 DNS ${internalDns} 不可达（${domainScan.error}）`)}`);
-    say(dim("    跳过内网域名分类 —— 不在公司网络时这是正常现象"));
+    rep.line(warn(`内网 DNS ${internalDns} 不可达（${domainScan.error}）`));
+    rep.dim("跳过内网域名分类 —— 不在公司网络时这是正常现象");
   } else {
     const { internal, suffixes } = domainScan;
-    say(`  ${info(`${internal.length} 个内网域名解析到私网地址`)}`);
+    rep.line(info(`${internal.length} 个内网域名解析到私网地址`));
 
     // 「还发不发假地址」要走系统解析器问 —— TUN 开着时内网 DNS 根本
     // 看不到 198.18.x，之前的查法永远是 0，等于没查。
@@ -628,15 +640,15 @@ export async function cmdDoctor(args) {
         .map((c) => c.s);
       if (missing.length) {
         exitCode = 1;
-        say(`  ${bad(`${missing.length} 个后缀仍是假 IP — 请运行：tunless fix`)}`);
-        for (const m of missing) say(dim(`    +.${m}`));
+        rep.line(bad(`${missing.length} 个后缀仍是假 IP — 请运行：tunless fix`));
+        for (const m of missing) rep.dim(`+.${m}`);
       } else {
-        say(`  ${ok("内网后缀经系统解析均不是假 IP")}`);
+        rep.line(ok("内网后缀经系统解析均不是假 IP"));
       }
     }
   }
 
-  say();
+  rep.blank();
   return exitCode;
 }
 
