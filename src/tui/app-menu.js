@@ -46,6 +46,27 @@ export const ACTIONS = [
  */
 export function actionsFor(appId) {
   const app = findApp(appId);
+
+  // Codex 是命令行工具：没有「启动/重启」这回事，
+  // 也没有 settings.json，它只认 ~/.codex/.env。
+  // 所以只留一项，文案也换成它自己的说法。
+  if (app?.id === "codex") {
+    return [
+      {
+        id: "settings",
+        label: "写入 ~/.codex/.env",
+        detail: "新开一个终端跑 codex 就生效（会先备份原文件）",
+        envOnlyEnough: true,
+      },
+      {
+        id: "env",
+        label: "不写，只给我环境变量",
+        detail: "打印 export 语句，你自己决定怎么用",
+        envOnlyEnough: true,
+      },
+    ];
+  }
+
   if (app && app.envOnlyEnough === false) {
     return ACTIONS.filter((action) => action.id !== "env");
   }

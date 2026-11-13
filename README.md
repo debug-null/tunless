@@ -40,7 +40,7 @@ tunless                    # 打开界面，上面就写着下一步按什么键
 
 | 步骤 | 作用 |
 |---|---|
-| 1 | 选工具（Antigravity / Cursor） |
+| 1 | 选工具（Antigravity / Cursor / Codex） |
 | 2 | 让它走 tunless 的代理（服务没跑会先让你启动服务） |
 | 3 | 实测连通性：真的发一个请求走一遍代理 |
 | 4 | 内网域名，也可以手写一条扫不到的 |
@@ -51,6 +51,7 @@ tunless                    # 打开界面，上面就写着下一步按什么键
 tunless doctor             # 诊断，不改任何东西
 tunless service install    # 安装并启动转发服务（开机自启，监听 127.0.0.1:8899）
 tunless launch Cursor      # 带代理重启 Cursor
+tunless launch Codex --write-settings   # 把代理写进 ~/.codex/.env
 tunless cursor             # Cursor 专用：写好 http.proxy 再重启（推荐）
 tunless rules add 10.0.0.0/8   # 手动补内网网段
 ```
@@ -212,7 +213,7 @@ tunless service <操作>   # install | uninstall | status | logs
 
 | 步骤 | 做什么 | 回车会发生什么 |
 | --- | --- | --- |
-| 1 | 选工具（Antigravity / Cursor） | 记住选中的应用，进入第 2 步 |
+| 1 | 选工具（Antigravity / Cursor / Codex） | 记住选中的应用，进入第 2 步 |
 | 2 | 让它走 tunless 的代理 | 只列出对这个工具**真正有用**的方式，执行它 |
 | 3 | 实测外网通不通 | 真的发一个请求走一遍代理，看结果 |
 | 4 | 看内网域名 | 列出已自动分流的内网域名，写一条手写规则也可以 |
@@ -226,6 +227,9 @@ tunless service <操作>   # install | uninstall | status | logs
 
 - **Antigravity**：只注入环境变量就够用（它的模型服务 `language_server` 是 Go 程序，会读 `HTTPS_PROXY`），所以三项都在，默认选第一项。
 - **Cursor**：模型请求走独立传输层，**不认环境变量代理**，只注入环境变量是连不上模型的，所以这一项根本不列出来，只剩「写配置」相关的两项。
+- **Codex**：命令行工具，没有「启动/重启」这回事。它的代理写在 `~/.codex/.env`，
+  而且**这个文件的优先级高于进程环境变量**，只 `export HTTPS_PROXY` 会被它盖掉
+  （表现为「明明设了代理，日志里却还在连系统代理」）。所以只给「写入 `.env`」和「只打印环境变量」两项。
 
 | 按键 | 作用 |
 | --- | --- |

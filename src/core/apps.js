@@ -10,7 +10,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { dataDir } from "./paths.js";
 
@@ -54,6 +54,22 @@ export const APPS = [
     envOnlyEnough: false,
     recommendedAction: "env+settings",
   },
+  {
+    id: "codex",
+    name: "Codex",
+    kind: "cli",
+    // Codex 没有 .app，装法有好几种：npm 全局、ChatGPT.app 自带、homebrew。
+    // 这里只认 CLI 本体，用它自己报的版本号。
+    bin: "codex",
+    // Codex 是 Rust 程序，会解析 HTTP_PROXY/HTTPS_PROXY/ALL_PROXY；
+    // 但它启动时还会读 CODEX_HOME/.env，且那个文件的优先级更高 ——
+    // 所以光给环境变量会被 .env 里的旧值盖掉，必须同时改 .env。
+    envOnlyEnough: false,
+    recommendedAction: "env+settings",
+    // 配置目录：CODEX_HOME 或 ~/.codex
+    configDir: () => process.env.CODEX_HOME || path.join(os.homedir(), ".codex"),
+    description: "用 ~/.codex/.env 里的代理，优先级高于环境变量",
+  },
 ];
 
 export function findApp(id = "antigravity") {
@@ -62,6 +78,15 @@ export function findApp(id = "antigravity") {
 
 export async function isAppInstalled(app) {
   if (!app) return false;
+  // CLI 类应用：在 PATH 里找得到就算装了
+  if (app.bin) {
+    try {
+      await exec("sh", ["-lc", `command -v ${app.bin}`], { timeout: 5000 });
+      return true;
+    } catch {
+      return false;
+    }
+  }
   try {
     await exec("open", ["-Ra", app.bundle], { timeout: 5000 });
     return true;
@@ -92,6 +117,89 @@ export function appVersion(bundle = "Cursor") {
 
 export function cursorVersion() {
   return appVersion("Cursor");
+}
+
+/** CLI 应用的版本号：跑 `<bin> --version` 取第一行里的版本 */
+export function cliVersion(app) {
+  if (!app?.bin) return null;
+  try {
+    const out = execFileSync("sh", ["-lc", `${app.bin} --version`], {
+      timeout: 8000,
+      encoding: "utf8",
+    });
+    const m = /(\d+\.\d+\.\d+)/.exec(out);
+    return m ? m[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Codex 的代理配置文件：<CODEX_HOME>/.env
+ *
+ * 关键事实（实测）：Codex 启动时会读这个文件把它注入进程环境，
+ * 而且优先级高于外面传进来的 HTTPS_PROXY。所以只给环境变量会被它盖掉，
+ * 表现为「设了代理却还是走系统代理」。改这个文件才真正生效。
+ */
+export function codexEnvPath(app = null) {
+  const target = app ?? findApp("codex");
+  const dir = target?.configDir ? target.configDir() : path.join(os.homedir(), ".codex");
+  return path.join(dir, ".env");
+}
+
+/** 读 Codex 的 .env：返回原始行与解析后的键值 */
+export function readCodexEnv(app = null) {
+  const file = codexEnvPath(app);
+  if (!fs.existsSync(file)) return { file, exists: false, raw: "", data: {} };
+  const raw = fs.readFileSync(file, "utf8");
+  const data = {};
+  for (const line of raw.split("\n")) {
+    const m = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/.exec(line);
+    if (!m) continue;
+    data[m[1]] = m[2].replace(/^["']|["']$/g, "");
+  }
+  return { file, exists: true, raw, data };
+}
+
+/**
+ * 只改 .env 里我们关心的三个键，其余行（注释、其它变量）原样保留。
+ * 缺键就追加到末尾；值变了就替换那一行。
+ */
+export function applyEnvText(raw, changes) {
+  const original = raw ?? "";
+  const lines = original.split("\n");
+  const pending = new Map(Object.entries(changes));
+
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(lines[i]);
+    if (!m) continue;
+    const key = m[1];
+    if (!pending.has(key)) continue;
+    lines[i] = `${key}=${pending.get(key)}`;
+    pending.delete(key);
+  }
+
+  if (pending.size) {
+    // 别把内容粘到最后一行空行后面
+    while (lines.length && lines[lines.length - 1] === "") lines.pop();
+    for (const [key, value] of pending) lines.push(`${key}=${value}`);
+  }
+
+  // 保持结尾换行，避免下次读的时候拼在一起
+  const text = lines.join("\n");
+  return text.endsWith("\n") ? text : `${text}\n`;
+}
+
+/** Codex .env 里的代理状态 */
+export function codexProxyState(app = null) {
+  const env = readCodexEnv(app);
+  return {
+    file: env.file,
+    exists: env.exists,
+    httpProxy: env.data.HTTP_PROXY ?? null,
+    httpsProxy: env.data.HTTPS_PROXY ?? null,
+    noProxy: env.data.NO_PROXY ?? env.data.no_proxy ?? null,
+  };
 }
 
 /**
@@ -284,6 +392,8 @@ function sleep(ms) {
 
 /** 应用的主进程 pid（Electron 应用会有几十个 helper，只看主进程） */
 export async function mainPid(app) {
+  // CLI 工具（codex）跑完就退出，没有长期驻留的主进程
+  if (app?.bin) return null;
   try {
     const { stdout } = await exec("pgrep", ["-f", `${app.bundle}.app/Contents/MacOS/${app.bundle}$`], {
       timeout: 5000,

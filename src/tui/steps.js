@@ -8,7 +8,7 @@ import { Box, Text } from "ink";
 import { h, Card, txt, segments, useTheme, useUnicode } from "./ui.js";
 import { padEnd } from "./width.js";
 import { actionsFor } from "./app-menu.js";
-import { findApp } from "../core/apps.js";
+import { findApp, codexProxyState } from "../core/apps.js";
 
 export const STEP_TITLES = [
   "选一个要联网的工具",
@@ -63,17 +63,18 @@ export function StepApps({ state, width, index }) {
   } else {
     const nameWidth = Math.max(...apps.map((a) => a.name.length)) + 2;
     apps.forEach((app, i) => {
+      // CLI 工具没有「在运行」这种状态，说清楚它是命令行工具就好
+      const state = app.running
+        ? "正在运行"
+        : app.id === "codex"
+          ? "命令行工具"
+          : "没在运行";
       rows.push(
         option(
           theme,
           i === index,
           app.name,
-          [
-            app.version ?? "",
-            app.running ? "正在运行" : "没在运行",
-          ]
-            .filter(Boolean)
-            .join(" · "),
+          [app.version ?? "", state].filter(Boolean).join(" · "),
           nameWidth,
         ),
       );
@@ -119,14 +120,33 @@ export function StepLaunch({ state, width, index, appName, appId, result, execut
   const app = findApp(appId ?? appName ?? "");
   const needsSettings = app ? app.envOnlyEnough === false : false;
   if (app) {
+    // 每个工具「认哪里的代理」不一样，这句话直接说清楚，
+    // 比让用户去读文档有用。
+    const why = {
+      antigravity: "模型请求认 HTTPS_PROXY，只注入环境变量就能用",
+      cursor: "模型请求不认环境变量代理，必须写 settings.json",
+      codex: "优先读 ~/.codex/.env，会盖掉外面的环境变量",
+    }[app.id];
     rows.push([
       txt("  "),
       needsSettings
-        ? txt(`▲ ${app.name} 的模型请求不认环境变量代理，所以下面只列能用的方式`, {
-            color: theme.colors.warn,
-          })
-        : txt(`✔ ${app.name} 只注入环境变量就能用`, { color: theme.colors.ok }),
+        ? txt(`▲ ${app.name}：${why}`, { color: theme.colors.warn })
+        : txt(`✔ ${app.name}：${why}`, { color: theme.colors.ok }),
     ]);
+
+    // Codex 的 .env 现在指向哪，一眼可见
+    if (app.id === "codex") {
+      const state = codexProxyState(app);
+      rows.push([
+        txt("  "),
+        txt(padEnd("现在的 .env", 12), { dim: true }),
+        state.httpsProxy
+          ? txt(state.httpsProxy, {
+              color: state.httpsProxy.includes(":8899") ? theme.colors.ok : theme.colors.warn,
+            })
+          : txt("没设置", { dim: true }),
+      ]);
+    }
     rows.push([txt("  ")]);
   }
 

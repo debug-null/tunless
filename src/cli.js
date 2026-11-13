@@ -39,6 +39,9 @@ import {
   backupFile,
   quitApp,
   openApp,
+  readCodexEnv,
+  applyEnvText,
+  codexProxyState,
 } from "./core/apps.js";
 import { VergeAdapter } from "./adapters/verge.js";
 import { GenericAdapter } from "./adapters/generic.js";
@@ -495,6 +498,30 @@ export async function cmdLaunch(args) {
   // 默认只注入环境变量，加 --write-settings 才写 settings.json。
   const target = findApp(app);
   const wantSettings = args.flags["write-settings"] === true;
+
+  // Codex 不是 GUI，没有「重启」这回事，直接把 .env 写好就结束。
+  if (target?.id === "codex") {
+    if (wantSettings) {
+      const result = await configureCodex({
+        proxyUrl: `http://127.0.0.1:${httpPort}`,
+        noProxy: env.NO_PROXY,
+        yes: true,
+        quiet,
+        app: target,
+      });
+      if (!result.ok) return 1;
+    } else {
+      say(dim(`  Codex 的 ~/.codex/.env 未改动（需要的话加 --write-settings）`));
+      say(dim(`    注意：Codex 会优先读那个文件，只给环境变量可能被它盖掉`));
+    }
+    if (args.flags["print-env"] === true) {
+      for (const [key, value] of Object.entries(env)) say(dim(`    export ${key}=${value}`));
+      say();
+    }
+    say(`\n  ${ok("Codex 已配置。新开一个终端跑 codex 就生效")}\n`);
+    return 0;
+  }
+
   if (wantSettings && target?.settingsPath) {
     const result = await configureCursor({
       proxyUrl: `http://127.0.0.1:${httpPort}`,
@@ -603,6 +630,69 @@ export async function configureCursor({ proxyUrl, yes = false, quiet = false, ap
   }
   fs.writeFileSync(settings.file, next, "utf8");
   say(`  ${ok(`${target.name} 配置已更新`)}`);
+  return { ok: true, changed: true };
+}
+
+/**
+ * Codex 专用：把代理写进 ~/.codex/.env。
+ *
+ * 为什么要改文件而不是只设环境变量 —— 实测结论：
+ * Codex 启动时会读 <CODEX_HOME>/.env 并注入进程环境，其优先级高于
+ * 外面传进来的 HTTPS_PROXY。所以只 export 环境变量会被 .env 里的旧值
+ * 盖掉，表现为「明明设了代理，日志里却还连 127.0.0.1:7897」。
+ */
+export async function configureCodex({ proxyUrl, noProxy, yes = false, quiet = false, app = null } = {}) {
+  const target = app ?? findApp("codex");
+  const env = readCodexEnv(target);
+  const noProxyValue = noProxy || "localhost,127.0.0.1,::1,.local";
+
+  const changes = {
+    HTTP_PROXY: proxyUrl,
+    HTTPS_PROXY: proxyUrl,
+    NO_PROXY: noProxyValue,
+  };
+
+  const diff = [];
+  for (const [key, value] of Object.entries(changes)) {
+    if (env.data[key] !== value) diff.push({ key, before: env.data[key], after: value });
+  }
+
+  if (!quiet) {
+    say(head(`\n── ${target.name} 代理配置 ──\n`));
+    say(`  ${info(`配置文件：${env.file}`)}`);
+    if (!env.exists) {
+      say(`  ${warn("这个文件还不存在，会新建一个（Codex 会读它）")}`);
+    }
+  }
+
+  if (!diff.length) {
+    say(`  ${ok("代理设置已经就绪，无需改动")}`);
+    return { ok: true, changed: false };
+  }
+
+  if (!quiet) {
+    say(head(`\n  将要修改（${diff.length} 项）：`));
+    for (const d of diff) {
+      say(`    ${d.key}`);
+      say(dim(`      现在：${d.before === undefined ? "（未设置）" : d.before}`));
+      say(`      改为：${d.after}`);
+    }
+  }
+
+  if (!yes) {
+    const answer = await prompt(`\n  确认写入 ${target.name} 的 .env？[y/N] `);
+    if (!/^y(es)?$/i.test(answer.trim())) {
+      say(`\n  ${warn("已取消 — 未写入任何内容")}\n`);
+      return { ok: false, changed: false };
+    }
+  }
+
+  // 目录可能不存在（CODEX_HOME 指到新地方时）
+  fs.mkdirSync(path.dirname(env.file), { recursive: true });
+  const backup = env.exists ? backupFile(env.file) : null;
+  if (backup) say(`\n  ${info(`已备份：${backup}`)}`);
+  fs.writeFileSync(env.file, applyEnvText(env.raw, changes), "utf8");
+  say(`  ${ok(`${target.name} 代理配置已更新`)}`);
   return { ok: true, changed: true };
 }
 
@@ -879,7 +969,7 @@ ${head("用法")}
   tunless scan [选项]         列出候选域名及其解析结果
   tunless fix [选项]          生成方案 → 预览差异 → 确认 → 应用 → 校验
   tunless proxy [选项]        启动本地转发代理，把代理能力交给工具
-  tunless launch [应用]       带代理环境重启某个应用
+  tunless launch [应用]       带代理环境重启某个应用（支持 Antigravity / Cursor / Codex）
   tunless cursor              给 Cursor 配好代理并带代理重启（专治模型连不上）
   tunless rules [操作]        add | remove | list — 手动补充内网域名/关键词/IP 段
   tunless service <操作>      install | uninstall | status | logs
@@ -895,7 +985,7 @@ ${head("选项")}
   --print-env           只打印环境变量后退出
   --no-scan             仅使用客户端配置，不做实时扫描
   --app <名称>          要启动的应用（默认 Antigravity）
-  --write-settings      同时写入应用的代理配置（默认只注入环境变量，不改文件）
+  --write-settings      同时写入应用的代理配置（Codex 写 ~/.codex/.env）
   --yes, -y             跳过确认提示
   --help, -h            显示帮助
 

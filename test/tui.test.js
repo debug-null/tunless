@@ -314,7 +314,7 @@ test("第 2 步按应用过滤选项：Cursor 不给「只注入环境变量」�
       }),
     ),
   );
-  assert.match(antigravity, /Antigravity 只注入环境变量就能用/);
+  assert.match(antigravity, /Antigravity：模型请求认 HTTPS_PROXY/);
   assert.match(antigravity, /只注入代理环境变量后启动/);
 
   const cursor = await shot(
@@ -331,7 +331,7 @@ test("第 2 步按应用过滤选项：Cursor 不给「只注入环境变量」�
       }),
     ),
   );
-  assert.match(cursor, /Cursor 的模型请求不认环境变量代理/);
+  assert.match(cursor, /Cursor：模型请求不认环境变量代理/);
   // Cursor 的列表里不该再出现「只注入代理环境变量」——它对 Cursor 是没用的
   assert.doesNotMatch(cursor, /只注入代理环境变量后启动/);
   assert.match(cursor, /注入环境变量 \+ 写入代理配置后启动/);

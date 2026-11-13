@@ -184,29 +184,58 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const applyAppAction = useCallback(
     async (app, actionId) => {
       if (!app) return null;
-      if (actionId === "env") {
-        await launchApp(app.name, { writeSettings: false });
-        return `${app.name} 已带代理启动`;
+      if (actionId === "env" || actionId === "env+settings") {
+        await launchApp(app.name, { writeSettings: actionId === "env+settings" });
+        return app.id === "codex" || app.name === "Codex"
+          ? "Codex 的代理已写入 .env，新开终端跑 codex 就生效"
+          : actionId === "env"
+            ? `${app.name} 已带代理启动`
+            : `${app.name} 已带代理启动，并写入代理配置`;
       }
-      if (actionId === "env+settings") {
-        await launchApp(app.name, { writeSettings: true });
-        return `${app.name} 已带代理启动，并写入代理配置`;
+      // Codex 的「只给我环境变量」：打印出来，不写文件
+      if (actionId === "env" && (app.id === "codex" || app.name === "Codex")) {
+        const envLines = [
+          `export HTTPS_PROXY=http://127.0.0.1:8899`,
+          `export HTTP_PROXY=http://127.0.0.1:8899`,
+          `export NO_PROXY=localhost,127.0.0.1,::1,.local`,
+        ];
+        setHint(`复制到你的 shell：${envLines.join("  ")}`);
+        log(`Codex 环境变量（注意：.env 会覆盖它们，可能需要先清空 .env）`, "warn");
+        return "已给出环境变量（Codex 仍可能读 .env 覆盖）";
       }
+
       if (actionId === "settings") {
-        const { configureCursor, setQuiet } = await import("../cli.js");
+        const { configureCursor, configureCodex, setQuiet } = await import("../cli.js");
         setQuiet(true);
-        const result = await configureCursor({
-          proxyUrl: "http://127.0.0.1:8899",
-          yes: true,
-          quiet: true,
-          app,
-        });
+        // Codex 的配置在 ~/.codex/.env，不是 settings.json
+        const result =
+          app.id === "codex" || app.name === "Codex"
+            ? await configureCodex({
+                proxyUrl: "http://127.0.0.1:8899",
+                yes: true,
+                quiet: true,
+                app: findApp("codex"),
+              })
+            : await configureCursor({
+                proxyUrl: "http://127.0.0.1:8899",
+                yes: true,
+                quiet: true,
+                app: findApp(app.id) ?? app,
+              });
         if (!result.ok) {
-          setHint(`写入失败：${app.name} 的配置文件可能还没生成，先打开一次应用`);
+          setHint(
+            app.name === "Codex"
+              ? `写入失败：检查 ${app.name} 的 .env 写权限`
+              : `写入失败：${app.name} 的配置文件可能还没生成，先打开一次应用`,
+          );
           return null;
         }
-        setHint(`${app.name} 配置已写入，重启应用后生效`);
-        return `${app.name} 代理配置已写入`;
+        setHint(
+          app.name === "Codex"
+            ? "Codex 的 .env 已写入，新开一个终端跑 codex 就生效"
+            : `${app.name} 配置已写入，重启应用后生效`,
+        );
+        return app.name === "Codex" ? "Codex 的代理已写入 .env" : `${app.name} 代理配置已写入`;
       }
       return null;
     },
@@ -417,14 +446,17 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
           setHint("转发服务已启动，再按回车选择处理方式");
           return;
         }
-        const app = { name: appName };
+        const app = findApp(appId) ?? { name: appName, id: appId };
         const action = actionsFor(appId)[actionIndex];
         if (!action) return;
         setBusy(true);
+        const isCli = appId === "codex";
         setExecuting(
-          action.id === "settings"
-            ? `正在写入 ${appName} 的代理配置…`
-            : `正在以 tunless 代理重启 ${appName}…`,
+          isCli
+            ? `正在写入 ${appName} 的 .env…`
+            : action.id === "settings"
+              ? `正在写入 ${appName} 的代理配置…`
+              : `正在以 tunless 代理重启 ${appName}…`,
         );
         applyAppAction(app, action.id)
           .then((result) => {

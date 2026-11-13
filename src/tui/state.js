@@ -9,7 +9,7 @@ import { inspectProcesses } from "../core/proc.js";
 import { serviceStatus } from "../core/launchd.js";
 import { mergeHostsValidated, partitionByKind } from "../core/plan.js";
 import { loadRules, ruleSuffixes } from "../core/rules.js";
-import { APPS, isAppInstalled, appVersion, mainPid } from "../core/apps.js";
+import { APPS, isAppInstalled, appVersion, cliVersion, mainPid } from "../core/apps.js";
 import net from "node:net";
 
 const DEFAULT_INTERNAL_DNS = "10.249.150.130";
@@ -130,7 +130,7 @@ export async function collectState({
           description: app.description,
           installed,
           running: Boolean(pid),
-          version: appVersion(app.bundle),
+          version: app.bin ? cliVersion(app) : appVersion(app.bundle),
         };
       }),
     );
