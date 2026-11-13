@@ -29,7 +29,8 @@ import {
 } from "./core/launchd.js";
 import {
   findApp,
-  cursorVersion,
+  appVersion,
+  readAppSettings,
   readCursorSettings,
   cursorProxyState,
   planCursorSettings,
@@ -51,7 +52,8 @@ export function setQuiet(value) {
   quiet = Boolean(value);
 }
 function say(text) {
-  if (!quiet) console.log(text);
+  // 无参调用是想打印一个空行，而不是把 undefined 打出去
+  if (!quiet) console.log(text ?? "");
 }
 
 const C = {
@@ -469,15 +471,23 @@ export async function cmdLaunch(args) {
   say(`  ${info(`代理：http://127.0.0.1:${httpPort}${socksPort ? ` / socks5://127.0.0.1:${socksPort}` : ""}`)}`);
   say(`  ${dim(`NO_PROXY：${noProxyList}`)}`);
 
+  // --print-env 只打印变量，不改配置也不启动应用
   if (args.flags["print-env"] === true) {
+    for (const [key, value] of Object.entries(env)) say(dim(`    export ${key}=${value}`));
     say();
     return 0;
   }
 
-  // Cursor 的 Agent 有独立的传输层，光给环境变量不够，还得写 settings.json。
+  // VS Code 系应用（Antigravity / Cursor）的 Chromium 部分读 http.proxy，
+  // 光给环境变量只通一半，所以还要写 settings.json。
   const target = findApp(app);
-  if (target?.kind === "cursor") {
-    const result = await configureCursor({ proxyUrl: `http://127.0.0.1:${httpPort}`, yes: true, quiet: false });
+  if (target?.settingsPath) {
+    const result = await configureCursor({
+      proxyUrl: `http://127.0.0.1:${httpPort}`,
+      yes: true,
+      quiet: false,
+      app: target,
+    });
     if (!result.ok) return 1;
   }
 
@@ -490,7 +500,7 @@ export async function cmdLaunch(args) {
   if (quitResult.escalated) {
     say(dim(`    注意：${app} 忽略了正常退出请求，已强制关闭以便带代理重启`));
   }
-  await new Promise((r) => setTimeout(r, target?.kind === "cursor" ? 2000 : 800));
+  await new Promise((r) => setTimeout(r, target?.settingsPath ? 2000 : 800));
   await openApp({ bundle: app.replace(/\.app$/, "") }, env);
   say(`\n  ${ok(`已使用 tunless 代理启动 ${app.replace(/\.app$/, "")}`)}\n`);
   return 0;
@@ -502,19 +512,20 @@ export async function cmdLaunch(args) {
  * 只修这个不修那个是没用的 —— Cursor 的 Chromium 部分读 http.proxy，
  * Agent 的 Node 传输层读环境变量；3.28 之前 HTTP/2 通路还会完全绕过代理。
  */
-export async function configureCursor({ proxyUrl, yes = false, quiet = false } = {}) {
-  const settings = readCursorSettings();
-  const version = cursorVersion();
+export async function configureCursor({ proxyUrl, yes = false, quiet = false, app = null } = {}) {
+  const target = app ?? findApp("cursor");
+  const settings = readAppSettings(target);
+  const version = appVersion(target.bundle);
   const current = cursorProxyState(settings);
-  const { changes, warnings } = planCursorSettings({ proxyUrl, version });
+  const { changes, warnings } = planCursorSettings({ proxyUrl, version, app: target });
 
   if (!settings.exists) {
-    say(`  ${warn(`没找到 Cursor 配置：${settings.file}`)}`);
-    say(dim("    先打开一次 Cursor，让它生成配置再运行这条命令"));
+    say(`  ${warn(`没找到 ${target.name} 配置：${settings.file}`)}`);
+    say(dim(`    先打开一次 ${target.name}，让它生成配置再运行这条命令`));
     return { ok: false };
   }
   if (settings.parseError) {
-    say(`  ${warn(`Cursor 配置无法解析：${settings.parseError}`)}`);
+    say(`  ${warn(`${target.name} 配置无法解析：${settings.parseError}`)}`);
     say(dim("    为避免写坏配置，这里不做修改"));
     return { ok: false };
   }
@@ -526,7 +537,7 @@ export async function configureCursor({ proxyUrl, yes = false, quiet = false } =
   }
 
   if (!quiet) {
-    say(head("\n── Cursor 代理配置 ──\n"));
+    say(head(`\n── ${target.name} 代理配置 ──\n`));
     say(`  ${info(`版本：${version ?? "未知"}`)}`);
     say(`  ${info(`配置文件：${settings.file}`)}`);
     if (current.proxySupport && current.proxySupport !== "override") {
@@ -551,7 +562,7 @@ export async function configureCursor({ proxyUrl, yes = false, quiet = false } =
   }
 
   if (!yes) {
-    const answer = await prompt("\n  确认写入 Cursor 配置？[y/N] ");
+    const answer = await prompt(`\n  确认写入 ${target.name} 配置？[y/N] `);
     if (!/^y(es)?$/i.test(answer.trim())) {
       say(`\n  ${warn("已取消 — 未写入任何内容")}\n`);
       return { ok: false, changed: false };
@@ -568,7 +579,7 @@ export async function configureCursor({ proxyUrl, yes = false, quiet = false } =
     return { ok: false };
   }
   fs.writeFileSync(settings.file, next, "utf8");
-  say(`  ${ok("Cursor 配置已更新")}`);
+  say(`  ${ok(`${target.name} 配置已更新`)}`);
   return { ok: true, changed: true };
 }
 

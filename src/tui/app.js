@@ -13,6 +13,8 @@ import { queryTerminalColorScheme, themeFromEnv } from "./terminal-theme.js";
 import { PANELS, OverviewPanel } from "./panels.js";
 import { HelpPanel } from "./help.js";
 import { RulesPanel, MorePanel } from "./rules-panel.js";
+import { AppMenu } from "./app-menu.js";
+import { APPS } from "../core/apps.js";
 import { addRule, removeRule, saveRules, loadRules, RULE_KINDS } from "../core/rules.js";
 import { isFirstRun, markSeen } from "./first-run.js";
 import { collectState, emptyState } from "./state.js";
@@ -24,11 +26,9 @@ const PANEL_COMPONENTS = {
   help: HelpPanel,
 };
 
-const DEFAULT_HINT = "← → 换页 · s 开关转发服务 · a 加内网域名 · f 修 DNS · q 退出";
+const DEFAULT_HINT = "← → 换页 · s 开关转发服务 · l 选应用启动 · a 加内网域名 · f 修 DNS · q 退出";
 
 /** 按 l 能依次启动的应用；这些是实际验证过「靠环境变量/配置能走代理」的 */
-const APP_CHOICES = ["Antigravity", "Cursor"];
-
 export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const { exit } = useApp();
   const { stdout } = useStdout();
@@ -48,7 +48,9 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const [editing, setEditing] = useState(null);
   const [draft, setDraft] = useState("");
   const [ruleIndex, setRuleIndex] = useState(0);
-  const [appChoice, setAppChoice] = useState(0);
+  // 按 l 弹出的应用选择菜单
+  const [appMenu, setAppMenu] = useState(false);
+  const [appMenuIndex, setAppMenuIndex] = useState(0);
 
   const log = useCallback((text, kind = "info") => {
     const time = new Date().toLocaleTimeString("zh-CN", { hour12: false });
@@ -166,12 +168,22 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     await refresh();
   }, [internalDns, includeChrome, log, refresh]);
 
-  /** 按 l 依次在受支持的应用之间切换，避免用户不知道能启动哪个 */
+  /**
+   * 按 l 打开应用选择菜单。
+   * 之前是「按一次换一个」地轮流，用户不知道当前轮到谁；
+   * 改成显式选择后，每次都知道自己要启动的是哪个。
+   */
   const runLaunch = useCallback(async () => {
-    const app = APP_CHOICES[appChoice % APP_CHOICES.length];
-    setAppChoice((i) => i + 1);
-    await launchApp(app);
-  }, [appChoice, launchApp]);
+    setAppMenu(true);
+  }, []);
+
+  const launchFromMenu = useCallback(
+    async (app) => {
+      setAppMenu(false);
+      await launchApp(app);
+    },
+    [launchApp],
+  );
 
   /** Cursor 专用：改 settings.json + 关 HTTP/2 + 带代理重启 */
   const runCursor = useCallback(async () => {
@@ -316,6 +328,31 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   }, [flatRules, ruleIndex, log]);
 
   useInput((input, key) => {
+    // 应用选择菜单：上下移动、回车确认、Esc 取消
+    if (appMenu) {
+      if (key.escape) {
+        setAppMenu(false);
+        setAppMenuIndex(0);
+        return;
+      }
+      if (key.upArrow) {
+        setAppMenuIndex((i) => Math.max(0, i - 1));
+        return;
+      }
+      if (key.downArrow) {
+        setAppMenuIndex((i) => Math.min(APPS.length - 1, i + 1));
+        return;
+      }
+      if (key.return) {
+        const app = APPS[appMenuIndex];
+        setAppMenu(false);
+        setAppMenuIndex(0);
+        launchFromMenu(app.name);
+        return;
+      }
+      return;
+    }
+
     // 输入规则：所有按键都进输入框，Tab 在三种类型之间切换
     if (editing) {
       if (key.escape) {
@@ -478,7 +515,6 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     editing,
     draft,
     ruleIndex,
-    appChoice,
   };
 
   const right = busy
@@ -492,9 +528,11 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       : null;
 
   const helpText = panel === "help" ? "← 回到总览 · r 刷新 · q 退出" : DEFAULT_HINT;
-  const help = searching
-    ? h(Text, { color: theme.colors.info }, `搜索：${query}▏（回车确认，Esc 取消）`)
-    : h(Text, { dimColor: true }, hint || helpText);
+  const help = appMenu
+    ? h(Text, { dimColor: true }, "回车启动 · ↑↓ 选择 · Esc 取消")
+    : searching
+      ? h(Text, { color: theme.colors.info }, `搜索：${query}▏（回车确认，Esc 取消）`)
+      : h(Text, { dimColor: true }, hint || helpText);
 
   return h(
     Box,
@@ -510,7 +548,9 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     h(
       Box,
       { flexDirection: "column", flexGrow: 1, overflow: "hidden" },
-      h(PanelComponent, panelProps),
+      appMenu
+        ? h(AppMenu, { width, index: appMenuIndex })
+        : h(PanelComponent, panelProps),
     ),
     h(Box, { flexDirection: "column" }, help, h(Text, { dimColor: true }, " ")),
   );

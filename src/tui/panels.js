@@ -21,7 +21,7 @@ function columnsFor(width, ratio) {
   return { nameWidth, ipWidth };
 }
 
-export function OverviewPanel({ state, width, appChoice = 0 }) {
+export function OverviewPanel({ state, width }) {
   const theme = useTheme();
   const symbols = symbolSet(useUnicode());
 
@@ -130,8 +130,7 @@ export function OverviewPanel({ state, width, appChoice = 0 }) {
   const coreCardRows = pad(coreRows);
   const sideCardRows = pad(sideRows);
 
-  const nextApp = ["Antigravity", "Cursor"][appChoice % 2];
-  const stepRows = nextSteps(state, { nextApp }).map((step) => [
+  const stepRows = nextSteps(state).map((step) => [
     txt("  "),
     step.key
       ? txt(`按 ${step.key}`, { color: theme.colors.accent, bold: true })

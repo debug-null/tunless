@@ -39,7 +39,7 @@ tunless                    # 打开界面，上面就写着下一步按什么键
 | 按键 | 作用 |
 |---|---|
 | `s` | 开关转发服务（第一次按会装成开机自启） |
-| `l` | 用代理重启应用，每按一次换一个（Antigravity → Cursor） |
+| `l` | 弹出菜单，选 Antigravity 或 Cursor 带代理重启 |
 | `L` | Cursor 专用：改设置 + 重启（模型连不上就用这个） |
 | `a` | **手写一条内网域名 / 关键词 / IP 段**，不需要任何系统授权 |
 
@@ -60,6 +60,18 @@ HTTPS_PROXY=http://127.0.0.1:8899 HTTP_PROXY=http://127.0.0.1:8899 Cursor
 ```
 
 不想用它的话，在应用自己的代理设置里填 **协议 HTTP、地址 127.0.0.1、端口 8899** 即可。
+
+## Antigravity 和 Cursor 的区别
+
+两个都是 VS Code 系的 Electron 应用，但网络通路不一样：
+
+| 应用 | 模型请求走哪 | 需要做什么 |
+|---|---|---|
+| Antigravity | `language_server`（Go 程序，认 `HTTPS_PROXY`） | 环境变量 + `http.proxy` |
+| Cursor | Agent 自己的 Node 传输层 + Chromium | 环境变量 + `http.proxy` +（3.28 前）关 HTTP/2 |
+
+`tunless launch` 对两个应用都会写 `settings.json` 的 `http.proxy` 并注入环境变量，
+按 `l` 选哪个就处理哪个。
 
 ## Cursor 为什么会「连不上模型」
 

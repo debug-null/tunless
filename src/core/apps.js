@@ -21,15 +21,31 @@ export const APPS = [
     id: "antigravity",
     name: "Antigravity",
     bundle: "Antigravity",
-    kind: "env",
-    description: "只认 HTTPS_PROXY 环境变量",
+    kind: "vscode",
+    // Antigravity 是 VS Code 系的 Electron 应用，Chromium 部分和 Cursor 一样
+    // 读 http.proxy；真正访问模型的是 language_server（Go 程序，支持 HTTPS_PROXY）。
+    settingsPath: () =>
+      path.join(
+        os.homedir(),
+        "Library/Application Support/Antigravity/User/settings.json",
+      ),
+    description: "模型走 language_server（认 HTTPS_PROXY）",
+    // 这个应用没有 Cursor 那种独立的 Agent 传输层，不需要动 HTTP/2
+    supportsHttp2Tunnel: true,
   },
   {
     id: "cursor",
     name: "Cursor",
     bundle: "Cursor",
-    kind: "cursor",
-    description: "Chromium 部分认 http.proxy，Agent 有独立的传输层",
+    kind: "vscode",
+    settingsPath: () =>
+      path.join(
+        os.homedir(),
+        "Library/Application Support/Cursor/User/settings.json",
+      ),
+    description: "Agent 有独立传输层，3.28 前会绕过代理",
+    // 3.28 起 Agent 的 HTTP/2 才会走 CONNECT 隧道
+    supportsHttp2Tunnel: false,
   },
 ];
 
@@ -54,8 +70,9 @@ export function cursorSettingsPath() {
   );
 }
 
-export function cursorVersion() {
-  const plist = "/Applications/Cursor.app/Contents/Info.plist";
+/** 应用版本号，从 /Applications/<Name>.app 的 Info.plist 读 */
+export function appVersion(bundle = "Cursor") {
+  const plist = `/Applications/${bundle}.app/Contents/Info.plist`;
   if (!fs.existsSync(plist)) return null;
   try {
     const buf = fs.readFileSync(plist, "utf8");
@@ -64,6 +81,10 @@ export function cursorVersion() {
   } catch {
     return null;
   }
+}
+
+export function cursorVersion() {
+  return appVersion("Cursor");
 }
 
 /**
@@ -124,6 +145,11 @@ export function stripJsonc(text) {
   return out.replace(/,(\s*[}\]])/g, "$1");
 }
 
+export function readAppSettings(app) {
+  const file = app?.settingsPath ? app.settingsPath() : cursorSettingsPath();
+  return readCursorSettings(file);
+}
+
 export function readCursorSettings(file = cursorSettingsPath()) {
   if (!fs.existsSync(file)) return { file, exists: false, raw: "", data: {} };
   const raw = fs.readFileSync(file, "utf8");
@@ -165,19 +191,26 @@ export function http2TunnelSupported(version) {
  * 计算需要写进 settings.json 的键。
  * 返回 { changes, warnings }，changes 是「要写成什么」，warnings 是要告诉用户的。
  */
-export function planCursorSettings({ proxyUrl, version }) {
+export function planCursorSettings({ proxyUrl, version, app = null }) {
   const changes = {
     "http.proxy": proxyUrl,
     "http.proxySupport": "override",
   };
   const warnings = [];
+  const name = app?.name ?? "Cursor";
+
+  // 只有 Cursor 有「Agent 走独立 HTTP/2 传输层」这个问题。
+  // Antigravity 的模型请求在 language_server（Go 程序）里，认 HTTPS_PROXY 就行。
+  if (app && app.supportsHttp2Tunnel) {
+    return { changes, warnings };
+  }
 
   if (http2TunnelSupported(version)) {
     changes["cursor.general.disableHttp2"] = false;
   } else {
     changes["cursor.general.disableHttp2"] = true;
     warnings.push(
-      `Cursor ${version ?? "版本未知"} 的 Agent 在 HTTP/2 下会绕过代理，需要关闭 HTTP/2（升级到 3.28+ 后可去掉）`,
+      `${name} ${version ?? "版本未知"} 的 Agent 在 HTTP/2 下会绕过代理，需要关闭 HTTP/2（升级到 3.28+ 后可去掉）`,
     );
   }
   return { changes, warnings };

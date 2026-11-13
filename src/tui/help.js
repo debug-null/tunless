@@ -34,11 +34,10 @@ export function nextSteps(state, opts = {}) {
     return [{ key: "f", text: `${state.fakeCount} 个内网域名拿到假 IP，按 f 修一下` }];
   }
 
-  const nextApp = opts.nextApp ?? "Antigravity";
   return [
     {
       key: "l",
-      text: `转发服务已就绪：按 l 用代理重启 ${nextApp}（再按一次换另一个应用）`,
+      text: "转发服务已就绪：按 l 选一个应用（Antigravity / Cursor）带代理重启",
     },
     { key: "a", text: "有扫不到的内网域名，按 a 直接手写一条" },
   ];
