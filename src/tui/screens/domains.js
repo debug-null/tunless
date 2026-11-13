@@ -92,7 +92,7 @@ export function DomainsScreen({ state, width = 80, ruleIndex = 0, rules = [] }) 
             h(
               Text,
               { color: theme.colors.warn },
-              `  还有 ${pending.length} 个后缀要重启服务才生效（按 s 重启）`,
+              `  还有 ${pending.length} 个后缀要重启服务才生效（按 s 停再启）`,
             ),
           ),
         );
@@ -167,7 +167,9 @@ export function DomainsScreen({ state, width = 80, ruleIndex = 0, rules = [] }) 
     { flexDirection: "column" },
     h(Text, { color: theme.colors.accent, bold: true }, " 内网域名与规则"),
     h(Text, null, " "),
-    h(StatusRow, { row: internalRow, selected: false, width }),
+    // 剥掉行内 action：status-rows 给的「d 查看」是仪表盘语境，
+    // 本屏 d 是「删选中规则」，留着等于教用户按删除键。
+    h(StatusRow, { row: { ...internalRow, action: null }, selected: false, width }),
     h(Section, { title: "内网域名" }, ...domainLines),
     h(Section, { title: "手写规则" }, ...ruleLines),
   );

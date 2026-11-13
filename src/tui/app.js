@@ -597,9 +597,13 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     const list = flatRules();
     if (!list.length) {
       setHint("还没有手动规则可删");
+      // domains 屏上看不到 hint 行，落一条事件让按键有回响
+      log("还没有手动规则可删", "warn");
       return;
     }
-    const target = list[ruleIndex % list.length];
+    // 与 domains 屏光标同一个 clamp：ruleIndex 陈旧（外部改了规则文件）时
+    // 高亮哪条删哪条，不能用 % 绕回删到别的规则。
+    const target = list[Math.min(Math.max(0, ruleIndex), list.length - 1)];
     try {
       const { rules, removed } = removeRule(loadRules(), target.value, target.kind);
       saveRules(rules);
@@ -803,7 +807,10 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         return;
       }
       if (key.upArrow || input === "k") {
-        setEventScroll((n) => Math.min(Math.max(0, events.length - 1), n + 1));
+        // 滚到「最早一窗」就停：再往上窗口越削越薄，没有更早的可看。
+        // limit 与 ServiceScreen 内同一个公式（rows - 14）。
+        const limit = Math.max(5, (stdout.rows ?? 24) - 14);
+        setEventScroll((n) => Math.min(Math.max(0, events.length - limit), n + 1));
         return;
       }
       if (key.downArrow || input === "j") {
@@ -1172,6 +1179,8 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
 const DASHBOARD_KEYS = [
   ["↑↓", "选择"],
   ["回车", "详情"],
+  ["d", "域名"],
+  ["l", "服务"],
   ["g", "向导"],
   ["s", "启停"],
   ["f", "修复"],

@@ -33,7 +33,7 @@ export function ServiceScreen({ state, width = 80, events = [], eventScroll = 0,
             ? txt(`运行中${s.pid ? ` · pid ${s.pid}` : ""}`, { color: theme.colors.ok })
             : s.installed
               ? txt("已停止 · 按 s 启动", { color: theme.colors.bad })
-              : txt("未安装 · 按 g 进向导装上", { color: theme.colors.warn }),
+              : txt("未安装 · 回仪表盘按 g 进向导装", { color: theme.colors.warn }),
       ],
       8,
     ),
@@ -49,7 +49,10 @@ export function ServiceScreen({ state, width = 80, events = [], eventScroll = 0,
     if (runtime) {
       // runtime.json 是服务启动那一刻写下的快照：它加载的上游与后缀数
       // 以这份为准，pending 后缀要重启才会进来。
-      if (startedText) statusLines.push(kv("启动于", [txt(startedText)], 8));
+      // startedAt 缺失也如实说「读不到」，不把行静默丢掉 —— 未知要显形。
+      statusLines.push(
+        kv("启动于", startedText ? [txt(startedText)] : [txt("读不到", { dim: true })], 8),
+      );
       statusLines.push(
         kv("上游", upstreamText ? [txt(upstreamText)] : [txt("读不到", { dim: true })], 8),
       );
@@ -59,7 +62,7 @@ export function ServiceScreen({ state, width = 80, events = [], eventScroll = 0,
           [
             txt(`${active} 个后缀生效中`, { color: theme.colors.ok }),
             pending
-              ? txt(` · 还有 ${pending} 个待生效 · s 重启生效`, { color: theme.colors.warn })
+              ? txt(` · 还有 ${pending} 个待生效（按 s 停再启生效）`, { color: theme.colors.warn })
               : null,
           ].filter(Boolean),
           8,
@@ -85,7 +88,8 @@ export function ServiceScreen({ state, width = 80, events = [], eventScroll = 0,
     { flexDirection: "column" },
     h(Text, { color: theme.colors.accent, bold: true }, " 服务"),
     h(Text, null, " "),
-    h(StatusRow, { row: serviceRow, selected: false, width }),
+    // 行内 action 是仪表盘语境（g/u 那些键在这屏不灵），剥掉，本屏按键看底部 KeyBar。
+    h(StatusRow, { row: { ...serviceRow, action: null }, selected: false, width }),
     h(
       Section,
       { title: "状态" },
