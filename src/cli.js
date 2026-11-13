@@ -921,6 +921,15 @@ export async function main(argv) {
     return 0;
   }
 
+  if (args.flags.version) {
+    const { readFileSync } = await import("node:fs");
+    const pkg = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    );
+    console.log(pkg.version);
+    return 0;
+  }
+
   if (!cmd || cmd === "tui" || cmd === "ui") {
     if (!process.stdout.isTTY) {
       // 没有交互式终端时退化成纯文本输出，方便在管道里看状态。
