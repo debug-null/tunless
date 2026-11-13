@@ -8,11 +8,10 @@
 // 终端不支持 Unicode 时符号与边框降级成 ASCII。
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { render, renderToString, Box, Text, useApp, useInput, useStdout } from "ink";
+import { render, Box, Text, useApp, useInput, useStdout } from "ink";
 import { h, ThemeProvider, useTheme } from "./ui.js";
 import { getTheme, detectUnicode } from "./theme.js";
 import { queryTerminalColorScheme, themeFromEnv } from "./terminal-theme.js";
-import { OverviewPanel } from "./panels.js";
 import {
   StepApps,
   StepUpstream,
@@ -52,7 +51,8 @@ import {
   parseUpstream,
   savePinnedUpstream,
 } from "../core/upstream.js";
-import { ROW_ORDER } from "../core/status-rows.js";
+import { ROW_ORDER, rowsFor, verdictFor } from "../core/status-rows.js";
+import { createReporter } from "../cli/report.js";
 
 export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const { exit } = useApp();
@@ -1437,30 +1437,33 @@ export async function runTui(options = {}) {
  * 没有 TTY 时 ink 的交互界面无法启动，退化成一份可直接阅读的文本。
  */
 export async function renderStaticSummary(options = {}) {
-  const unicode = detectUnicode();
-  const theme = getTheme(themeFromEnv() ?? "dark");
   const state = await collectState({
     internalDns: options.internalDns,
     repoRoots: options.repoRoots ?? [],
     includeChrome: options.includeChrome ?? false,
   });
 
-  // ink 在非 TTY 下按 80 列排版，这里必须用同一个宽度，
-  // 否则我们自己算的 100 列会和它的 80 列打架，并排卡片直接被折行。
-  const width = Math.min(process.stdout.columns || 80, 110);
-  const head = renderToString(
-    h(ThemeProvider, { theme, unicode }, h(OverviewPanel, { state, width })),
-  );
+  // 非 TTY 的总览与仪表盘共用同一份判词（rowsFor/verdictFor），
+  // 渲染走 report.js —— 不再借 ink 画纯文本。
+  const lines = [];
+  const rep = createReporter({ out: (line) => lines.push(line) });
+  const verdict = verdictFor(state);
+  rep.verdict(verdict.tone, verdict.text);
+  rep.blank();
+  rep.rows(rowsFor(state));
 
-  const nameWidth = Math.max(
-    20,
-    ...state.internalDomains.map((d) => d.name.length),
-  );
-  const domains = state.internalDomains.length
-    ? state.internalDomains
-        .map((d) => `  ${d.name.padEnd(nameWidth)}  ${d.ips.join(", ")}`)
-        .join("\n")
-    : "  （无）";
-
-  return `${head}\n内网域名\n${domains}\n`;
+  rep.section("内网域名");
+  if (state.internalDomains.length) {
+    const nameWidth = Math.max(
+      20,
+      ...state.internalDomains.map((d) => d.name.length),
+    );
+    for (const d of state.internalDomains) {
+      rep.line(`${d.name.padEnd(nameWidth)}  ${d.ips.join(", ")}`);
+    }
+  } else {
+    rep.dim("（无）");
+  }
+  rep.blank();
+  return `${lines.join("\n")}\n`;
 }

@@ -1114,31 +1114,32 @@ export async function configureCursor({ proxyUrl, yes = false, quiet = false, ap
  */
 export async function cmdEnv(args) {
   const action = args._[1] || "show";
+  const rep = createReporter({ out: say });
 
   if (action === "clear" || action === "unset") {
     const before = await sessionProxyEnv();
     await clearSessionProxyEnv();
     if (!Object.keys(before).length) {
-      say(dim("  登录会话里本来就没有代理变量。\n"));
+      rep.dim("登录会话里本来就没有代理变量。\n");
       return 0;
     }
-    say(`  ${ok("已从登录会话移除代理变量")}`);
-    for (const key of Object.keys(before)) say(dim(`    ${key}`));
-    say(dim("\n  已经打开的应用还带着旧变量，重启它们才会回到直连。\n"));
+    rep.row("ok", "登录会话", "已移除代理变量");
+    for (const key of Object.keys(before)) rep.dim(key);
+    rep.dim("\n已经打开的应用还带着旧变量，重启它们才会回到直连。\n");
     return 0;
   }
 
   const current = await sessionProxyEnv();
-  say(head("\n── 登录会话代理变量 ──\n"));
+  rep.section("登录会话代理变量");
   if (!Object.keys(current).length) {
-    say(dim("  没有设置。从 Dock / Finder 打开的应用不会自动带代理。"));
-    say(dim("  运行 `tunless service install` 或 `tunless proxy` 会写入。\n"));
+    rep.dim("没有设置。从 Dock / Finder 打开的应用不会自动带代理。");
+    rep.dim("运行 `tunless service install` 或 `tunless proxy` 会写入。\n");
     return 0;
   }
   for (const [key, value] of Object.entries(current)) {
-    say(`  ${key.padEnd(12)} ${dim(value)}`);
+    rep.line(`${key.padEnd(12)} ${dim(value)}`);
   }
-  say(dim("\n  撤销：tunless env clear\n"));
+  rep.suggest("撤销：tunless env clear\n");
   return 0;
 }
 
@@ -1363,27 +1364,34 @@ export async function cmdUpstream(args) {
   }
 
   const pinned = loadPinnedUpstream();
-  say(head("\n── 上游代理 ──\n"));
+  const rep = createReporter({ out: say });
+  rep.section("上游代理");
   if (pinned) {
-    say(`  ${ok(`${pinned.host}:${pinned.port}`)} ${dim("（手动指定）")}`);
+    rep.row("ok", "手动指定", `${pinned.host}:${pinned.port}`);
   } else {
-    say(dim("  未手动指定，当前为自动探测"));
+    rep.dim("未手动指定，当前为自动探测");
   }
 
   const resolved = await resolveUpstream({ flags: {} });
   if (resolved.upstream) {
-    say(`  ${info(`实际使用：${resolved.upstream.host}:${resolved.upstream.port}`)} ${dim(`（${resolved.detail}）`)}`);
+    const { host, port } = resolved.upstream;
+    const why = String(resolved.detail ?? "")
+      .replace(`${host}:${port}`, "")
+      .trim()
+      .replace(/^[（(]+|[）)]+$/g, "")
+      .trim();
+    rep.row("ok", "实际使用", `${host}:${port}${why ? `（${why}）` : ""}`);
     if (resolved.pinnedStale) {
-      say(`  ${warn(`你固定的 ${resolved.pinnedStale.host}:${resolved.pinnedStale.port} 已经不是你现在的客户端了`)}`);
-      say(dim("    已自动改用系统代理指向的端口。要固定下来：tunless upstream set <新端口>"));
+      rep.row("warn", "固定漂移", `你固定的 ${resolved.pinnedStale.host}:${resolved.pinnedStale.port} 已经不是你现在的客户端了`);
+      rep.suggest("已自动改用系统代理指向的端口。要固定下来：tunless upstream set <新端口>");
     }
     if (resolved.pinnedMissing) {
-      say(`  ${warn(`你固定的 ${resolved.pinnedMissing.host}:${resolved.pinnedMissing.port} 现在没有代理`)}`);
-      say(dim("    已临时回落到自动探测。要更新固定值：tunless upstream set <新端口>"));
+      rep.row("warn", "固定失效", `你固定的 ${resolved.pinnedMissing.host}:${resolved.pinnedMissing.port} 现在没有代理`);
+      rep.suggest("已临时回落到自动探测。要更新固定值：tunless upstream set <新端口>");
     }
   } else {
-    say(`  ${warn("当前没有可用的上游代理")}`);
-    say(dim(`    ${resolved.detail}`));
+    rep.row("warn", "上游", "当前没有可用的上游代理");
+    rep.dim(resolved.detail);
   }
 
   const found = await discoverUpstream({
@@ -1391,14 +1399,15 @@ export async function cmdUpstream(args) {
     timeoutMs: 800,
   });
   if (found.candidates.length) {
-    say(head("\n  本机候选："));
+    rep.blank();
+    rep.line(head("本机候选："));
     for (const c of found.candidates.slice(0, 12)) {
       const mark = c.isProxy ? paint(C.green, "✔") : paint(C.dim, "·");
-      say(`  ${mark} ${describeCandidate(c)} ${c.process ? dim(`— ${c.process}`) : ""}`);
+      rep.line(`${mark} ${describeCandidate(c)} ${c.process ? dim(`— ${c.process}`) : ""}`);
     }
   }
-  say(dim("\n  tunless upstream set 127.0.0.1:7897   # 手动指定"));
-  say(dim("  tunless upstream clear                 # 恢复自动探测\n"));
+  rep.suggest("tunless upstream set 127.0.0.1:7897   # 手动指定");
+  rep.suggest("tunless upstream clear                 # 恢复自动探测\n");
   return resolved.upstream ? 0 : 1;
 }
 
@@ -1517,23 +1526,24 @@ export async function cmdTargets(args) {
   }
 
   const custom = loadCustomTargets();
-  say(head("\n── 测试目标 ──\n"));
+  const rep = createReporter({ out: say });
+  rep.section("测试目标");
   for (const [appId, list] of Object.entries((await import("./core/targets.js")).APP_TARGETS)) {
-    say(`  ${info(appId)}`);
+    rep.line(info(appId));
     for (const t of list) {
-      say(dim(`    ${t.host}${t.port === 443 ? "" : `:${t.port}`}${t.path === "/" ? "" : t.path}  ${t.label ?? ""}`));
+      rep.dim(`${t.host}${t.port === 443 ? "" : `:${t.port}`}${t.path === "/" ? "" : t.path}  ${t.label ?? ""}`);
     }
   }
-  say(`  ${info("自定义")}`);
+  rep.line(info("自定义"));
   if (!custom.length) {
-    say(dim("    （还没有）"));
+    rep.dim("（还没有）");
   } else {
     for (const t of custom) {
-      say(dim(`    ${t.host}${t.port === 443 ? "" : `:${t.port}`}${t.path === "/" ? "" : t.path}`));
+      rep.dim(`${t.host}${t.port === 443 ? "" : `:${t.port}`}${t.path === "/" ? "" : t.path}`);
     }
   }
-  say(dim("\n  tunless targets add api.example.com"));
-  say(dim("  tunless targets remove api.example.com\n"));
+  rep.suggest("tunless targets add api.example.com");
+  rep.suggest("tunless targets remove api.example.com\n");
   return 0;
 }
 
@@ -1648,15 +1658,20 @@ export async function cmdService(args) {
   }
 
   const status = await serviceStatus();
-  say(head("\n── tunless 服务 ──\n"));
-  say(`  ${status.installed ? ok("launchd 常驻代理已安装") : warn("尚未安装")} ${dim(status.plist)}`);
+  const rep = createReporter({ out: say });
+  rep.section("tunless 服务");
+  rep.row(
+    status.installed ? "ok" : "warn",
+    "常驻代理",
+    `${status.installed ? "launchd 已安装" : "尚未安装"}${status.plist ? ` · ${status.plist}` : ""}`,
+  );
   if (status.installed) {
-    say(`  ${status.running ? ok(`运行中（pid ${status.pid}）`) : bad("已安装但未运行")}`);
+    rep.row(status.running ? "ok" : "bad", "运行状态", status.running ? `运行中（pid ${status.pid}）` : "已安装但未运行");
   }
-  say(dim("\n  tunless service install     # 开机自启，崩溃自动拉起"));
-  say(dim("  tunless service start|stop|restart   # 启动 / 停止 / 重启"));
-  say(dim("  tunless service uninstall   # 移除它"));
-  say(dim("  tunless service logs\n"));
+  rep.suggest("tunless service install     # 开机自启，崩溃自动拉起");
+  rep.suggest("tunless service start|stop|restart   # 启动 / 停止 / 重启");
+  rep.suggest("tunless service uninstall   # 移除它");
+  rep.suggest("tunless service logs\n");
   // 没在跑就是 1 —— 脚本里 `tunless service status && …` 才有意义
   return status.installed && status.running ? 0 : 1;
 }
@@ -1666,37 +1681,39 @@ export async function cmdFix(args) {
   const assumeYes = args.flags.yes === true || args.flags.y === true;
   const frontend = await pickFrontend(args);
   const adapter = resolveAdapter(frontend);
+  const rep = createReporter({ out: say });
 
-  say(head(`\n── tunless 修复（${frontend.label}）──\n`));
+  rep.section(`tunless 修复（${frontend.label}）`);
 
   // Surge / Stash 这类客户端没有可写的 mihomo 配置。不能先扫完再报错——
   // 那等于让用户白等一场，还以为工具快成功了。
   if (frontend.id !== "clash-verge-rev" && !frontend.configFile) {
-    say(`  ${bad("没有找到可写的代理内核配置")}`);
+    rep.row("bad", "内核配置", "没有找到可写的代理内核配置");
     if (frontend.runtimeOnly) {
-      say(dim(`    ${frontend.label} 的配置由 GUI 在运行时注入，磁盘上没有能改的配置文件`));
-      say(dim("    DNS 分流请在客户端里自己加内网域名；转发代理不受影响"));
+      rep.dim(`${frontend.label} 的配置由 GUI 在运行时注入，磁盘上没有能改的配置文件`);
+      rep.dim("DNS 分流请在客户端里自己加内网域名；转发代理不受影响");
     } else {
-      say(dim("    这一步只对 mihomo 系客户端有效（Clash Verge / ClashX Meta / mihomo-party）"));
+      rep.dim("这一步只对 mihomo 系客户端有效（Clash Verge / ClashX Meta / mihomo-party）");
     }
-    say(dim("    你的客户端还能用 tunless proxy：转发照常工作，只是 DNS 分流得在客户端里自己配"));
-    say();
+    rep.dim("你的客户端还能用 tunless proxy：转发照常工作，只是 DNS 分流得在客户端里自己配");
+    rep.blank();
     return 1;
   }
 
   const { file: targetFile } = await adapter.prepare();
   const conn = await connect(frontend);
   const api = conn.api;
-  say(`  ${ok(`内核接口：${api.descriptor}`)}`);
-  say(`  ${info(`目标文件：${targetFile}`)}`);
+  rep.row("ok", "内核接口", api.descriptor);
+  rep.line(info(`目标文件：${targetFile}`));
 
   // 内网 DNS 不通就没法分类，fix 的整个前提不成立 —— 趁早说清楚，
   // 而不是扫完几百个域名、每个都等满超时后报「没有内网域名」。
   const dnsAlive = await probeServer(internalDns);
   if (!dnsAlive.ok) {
-    say(`\n  ${bad(`内网 DNS ${internalDns} 不可达（${dnsAlive.error}）`)}`);
-    say(dim("    不在公司网络时没法判断哪些是内网域名，本次无法修复"));
-    say(dim("    连上公司网络 / VPN 后重跑，或用 --internal-dns 指定\n"));
+    rep.blank();
+    rep.row("bad", "内网 DNS", `${internalDns} 不可达（${dnsAlive.error}）`);
+    rep.dim("不在公司网络时没法判断哪些是内网域名，本次无法修复");
+    rep.suggest("连上公司网络 / VPN 后重跑，或用 --internal-dns 指定\n");
     return 1;
   }
 
@@ -1704,14 +1721,14 @@ export async function cmdFix(args) {
     ? String(args.flags.repos).split(",").map((s) => s.trim()).filter(Boolean)
     : [];
   const scanned = await scanAll({ repoRoots, includeChrome: args.flags["no-chrome"] !== true, logDir: frontend?.logDir ?? null });
-  say(`  ${info(`扫描到 ${scanned.hosts.length} 个候选域名`)}`);
+  rep.line(info(`扫描到 ${scanned.hosts.length} 个候选域名`));
 
   const results = await probeDomains(scanned.hosts.map((h) => h.host), internalDns);
   const { internal, fake } = partitionByKind(results);
   void fake;
 
   if (!internal.length) {
-    say(`  ${warn("未检测到内网域名 — 无需修复")}`);
+    rep.row("warn", "内网域名", "未检测到 — 无需修复");
     return 0;
   }
 
@@ -1726,36 +1743,39 @@ export async function cmdFix(args) {
   const before = Object.keys(existing).length ? dumpYaml({ dns: existing }, 0) : "";
   const after = dumpYaml({ dns: dnsSection }, 0);
 
-  say(head("\n  检测到的内网域名："));
+  rep.blank();
+  rep.line(head("检测到的内网域名："));
   for (const r of internal.sort((a, b) => a.name.localeCompare(b.name)).slice(0, 30)) {
-    say(`    ${r.name.padEnd(50)} ${dim(r.ips.join(", "))}`);
+    rep.dim(`${r.name.padEnd(50)} ${r.ips.join(", ")}`);
   }
-  if (internal.length > 30) say(dim(`    …… 还有 ${internal.length - 30} 个`));
+  if (internal.length > 30) rep.dim(`…… 还有 ${internal.length - 30} 个`);
 
-  say(head(`\n  将要配置的后缀（${suffixes.length}）：`));
-  for (const s of suffixes) say(`    +.${s}`);
+  rep.blank();
+  rep.line(head(`将要配置的后缀（${suffixes.length}）：`));
+  for (const s of suffixes) rep.dim(`+.${s}`);
 
   const diff = renderDiff(before, after);
-  say(head("\n  配置差异："));
+  rep.blank();
+  rep.line(head("配置差异："));
   if (diff.trim()) {
     for (const line of diff.split("\n")) {
-      if (line.startsWith("+")) say(paint(C.green, `    ${line}`));
-      else if (line.startsWith("-")) say(paint(C.red, `    ${line}`));
-      else say(dim(`    ${line}`));
+      if (line.startsWith("+")) rep.line(paint(C.green, `  ${line}`));
+      else if (line.startsWith("-")) rep.line(paint(C.red, `  ${line}`));
+      else rep.dim(`  ${line}`);
     }
   } else {
-    say(dim("    （无变化）"));
+    rep.dim("（无变化）");
   }
 
   if (!diff.trim()) {
-    say(`\n  ${ok("配置已经是最新状态")}\n`);
+    rep.row("ok", "配置", "已经是最新状态\n");
     return 0;
   }
 
   if (!assumeYes) {
     const answer = await prompt("确认应用这些改动？[y/N] ");
     if (!/^y(es)?$/i.test(answer.trim())) {
-      say(`\n  ${warn("已取消 — 未写入任何内容")}\n`);
+      rep.row("warn", "已取消", "未写入任何内容\n");
       return 1;
     }
   }
@@ -1764,20 +1784,20 @@ export async function cmdFix(args) {
   fs.mkdirSync(backup, { recursive: true });
   const backupFile = path.join(backup, path.basename(targetFile));
   fs.copyFileSync(targetFile, backupFile);
-  say(`\n  ${info(`备份：${backupFile}`)}`);
+  rep.line(info(`备份：${backupFile}`));
 
   await adapter.apply(dnsSection);
-  say(`  ${ok("配置已写入")}`);
+  rep.row("ok", "配置", "已写入");
 
-  say(`  ${info(adapter.id === "clash-verge-rev" ? "正在重启 Clash Verge…" : "正在重载内核…")}`);
+  rep.line(info(adapter.id === "clash-verge-rev" ? "正在重启 Clash Verge…" : "正在重载内核…"));
   // 重载失败必须回滚 —— 之前异常直接抛上去，文件改了、备份留了，
   // 用户只看到一句裸错误，配置停留在半生效状态。
   try {
     await adapter.reload(api);
   } catch (err) {
-    say(`  ${bad(`重载失败：${err.message}`)}`);
+    rep.row("bad", "重载", err.message);
     fs.copyFileSync(backupFile, targetFile);
-    say(`  ${warn("已从备份回滚")}\n`);
+    rep.row("warn", "回滚", "已从备份恢复\n");
     return 1;
   }
   await new Promise((r) => setTimeout(r, adapter.id === "clash-verge-rev" ? 9000 : 2000));
@@ -1789,28 +1809,28 @@ export async function cmdFix(args) {
     api,
   );
   if (verify.ok) {
-    say(`  ${ok("校验通过 — 内网域名均解析到私网地址")}`);
-    if (verify.warning) say(`  ${warn(verify.warning)}`);
+    rep.row("ok", "校验", "通过 — 内网域名均解析到私网地址");
+    if (verify.warning) rep.row("warn", "校验", verify.warning);
     const checks = await Promise.all(
       internal.slice(0, 5).map((r) => httpCheck(r.name)),
     );
     for (const c of checks) {
-      if (c.status) say(dim(`    ${c.host} → HTTP ${c.status}`));
-      else say(dim(`    ${c.host} → ${c.error} (HTTP check is advisory only)`));
+      if (c.status) rep.dim(`${c.host} → HTTP ${c.status}`);
+      else rep.dim(`${c.host} → ${c.error} (HTTP check is advisory only)`);
     }
-    say();
+    rep.blank();
     return 0;
   }
 
-  say(`  ${bad(`校验失败：${verify.reason}`)}`);
-  say(`  ${info(`正在从备份恢复：${backupFile}`)}`);
+  rep.row("bad", "校验", `失败：${verify.reason}`);
+  rep.line(info(`正在从备份恢复：${backupFile}`));
   fs.copyFileSync(backupFile, targetFile);
   try {
     await adapter.reload(api);
   } catch {
-    say(dim("    （重载失败 — 请手动重启代理客户端）"));
+    rep.dim("（重载失败 — 请手动重启代理客户端）");
   }
-  say(`  ${warn("已回滚")}\n`);
+  rep.row("warn", "回滚", "已回滚\n");
   return 1;
 }
 

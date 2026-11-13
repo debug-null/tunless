@@ -11,7 +11,6 @@ import {
   center,
   charWidth,
 } from "../src/tui/width.js";
-import { OverviewPanel } from "../src/tui/panels.js";
 import {
   StepApps,
   StepUpstream,
@@ -117,37 +116,8 @@ test("超长中文按显示宽度截断并加省略号", () => {
   assert.equal(truncate("abcdef", 3), "ab…");
 });
 
-test("总览面板渲染出关键状态", async () => {
-  const text = await shot(
-    h(Box, { flexDirection: "column", width: 120 }, h(OverviewPanel, { state: baseState, width: 120 })),
-  );
-  assert.match(text, /五步搞定/);
-  assert.match(text, /选工具/);
-  assert.match(text, /上游代理/);
-  assert.match(text, /用代理启动/);
-  assert.match(text, /测连通性/);
-  assert.match(text, /内网域名/);
-  assert.match(text, /8899/);
-  assert.match(text, /Clash Verge Rev/);
-  assert.match(text, /TUN/);
-});
-
-test("五步清单的标题列对齐（中文标题不错位）", async () => {
-  const text = await shot(
-    h(Box, { flexDirection: "column", width: 120 }, h(OverviewPanel, { state: baseState, width: 120 })),
-  );
-  const titles = ["选工具", "上游代理", "用代理启动", "测连通性", "内网域名"];
-  const starts = titles.map((title) => {
-    const line = text
-      .split("\n")
-      .find((l) => l.includes(title) && !l.includes("按 1"));
-    assert.ok(line, `找不到步骤行：${title}`);
-    const index = line.indexOf(title);
-    // 标题后面的空白是补齐的，所以标题起点必须一致
-    return displayWidth(line.slice(0, index));
-  });
-  assert.equal(new Set(starts).size, 1, `标题列终点不一致：${starts.join(",")}`);
-});
+// 总览面板已被仪表盘取代：判词覆盖见 status-rows.test.js，
+// 屏渲染覆盖见 dashboard.test.js / screens.test.js。
 
 test("规则面板显示自动扫描结果与手动规则", async () => {
   const state = {
@@ -248,23 +218,6 @@ test("亮色主题用深色前景字，暗色主题用白色", () => {
   assert.equal(getTheme("light").colors.warn, "magenta");
 });
 
-test("总览面板带提示时也能渲染（回归：cardWidth 提前使用会 TDZ 报错）", async () => {
-  const state = {
-    ...baseState,
-    notes: [
-      "chrome-history: 权限不足 — 请给终端授予「完全磁盘访问权限」以获取更完整的域名列表",
-    ],
-  };
-  const text = await shot(
-    h(
-      Box,
-      { flexDirection: "column", width: 120 },
-      h(OverviewPanel, { state, width: 120 }),
-    ),
-  );
-  assert.match(text, /提示/);
-  assert.match(text, /完全磁盘访问权限/);
-});
 
 test("向导第 1 步列出已安装的工具", async () => {
   const text = await shot(
