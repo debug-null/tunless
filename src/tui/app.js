@@ -1012,15 +1012,17 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     hint ||
       (editingTarget
         ? "回车保存 · Esc 取消"
-        : editingUpstream
-          ? "回车确认 · Esc 取消"
-          : wizardStep === 2 && !wizardDone
-            ? "↑↓ 选代理 · 回车确认 · m 手动填 · q 退出"
-            : wizardStep === 4 && !wizardDone
-              ? "r 重测 · t 加一个要测的域名 · 回车下一步"
-              : helpOpen
-                ? "Esc 返回"
-                : "h 看用法 · a 手写内网域名 · r 刷新 · q 退出"),
+        : editing
+          ? "Tab 换类型 · 回车保存 · Esc 取消"
+          : editingUpstream
+            ? "回车确认 · Esc 取消"
+            : helpOpen
+              ? "Esc 返回"
+              : wizardStep === 2 && !wizardDone
+                ? "↑↓ 选代理 · 回车确认 · m 手动填 · q 退出"
+                : wizardStep === 4 && !wizardDone
+                  ? "r 重测 · t 加一个要测的域名 · 回车下一步"
+                  : "h 看用法 · a 手写内网域名 · r 刷新 · q 退出"),
   );
 
   // 最近几条事件走 EventFeed 组件。仪表盘自己在正文里就带了一份事件流，
@@ -1028,7 +1030,9 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   // hint（修复/启停的结果）有值时在 KeyBar 上方露一行，别只进事件流。
   // 帮助打开时始终走 help 文案 —— HelpPanel 自己不写「Esc 返回」。
   const footer =
-    screen === "dashboard" && !helpOpen ? h(KeyBar, { keys: DASHBOARD_KEYS }) : help;
+    screen === "dashboard" && !helpOpen && !editing && !editingTarget && !editingUpstream
+      ? h(KeyBar, { keys: DASHBOARD_KEYS })
+      : help;
 
   return h(
     Box,
@@ -1057,6 +1061,17 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
           ? h(Text, { dimColor: true }, ` ${hint}`)
           : null
         : h(EventFeed, { events, limit: 3 }),
+      // 规则输入态必须可见 —— 之前 RulesPanel 不在组件树里时按 a
+      // 会进一个没有界面的模态，按键全被吞掉像假死。
+      editing
+        ? h(
+            Text,
+            null,
+            h(Text, { dimColor: true }, `  内网规则 [${editing}] `),
+            h(Text, { color: theme.colors.accent }, draft),
+            h(Text, { color: theme.colors.accent }, "█"),
+          )
+        : null,
       footer,
       h(Text, { dimColor: true }, " "),
     ),
