@@ -32,6 +32,10 @@ export const APPS = [
     description: "模型走 language_server（认 HTTPS_PROXY）",
     // 这个应用没有 Cursor 那种独立的 Agent 传输层，不需要动 HTTP/2
     supportsHttp2Tunnel: true,
+    // 只注入环境变量就够用：language_server 是 Go 程序，会读 HTTPS_PROXY
+    envOnlyEnough: true,
+    // 推荐的处理方式（对应 app-menu.js 里的 action id）
+    recommendedAction: "env",
   },
   {
     id: "cursor",
@@ -46,6 +50,9 @@ export const APPS = [
     description: "Agent 有独立传输层，3.28 前会绕过代理",
     // 3.28 起 Agent 的 HTTP/2 才会走 CONNECT 隧道
     supportsHttp2Tunnel: false,
+    // 只注入环境变量不够：Agent 不读环境变量代理，必须写 settings.json
+    envOnlyEnough: false,
+    recommendedAction: "env+settings",
   },
 ];
 

@@ -7,7 +7,8 @@
 import { Box, Text } from "ink";
 import { h, Card, txt, segments, useTheme, useUnicode } from "./ui.js";
 import { padEnd } from "./width.js";
-import { ACTIONS } from "./app-menu.js";
+import { actionsFor } from "./app-menu.js";
+import { findApp } from "../core/apps.js";
 
 export const STEP_TITLES = [
   "选一个要联网的工具",
@@ -89,7 +90,7 @@ export function StepApps({ state, width, index }) {
 }
 
 /** 第 2 步：让它走代理 */
-export function StepLaunch({ state, width, index, appName, result, serviceReady }) {
+export function StepLaunch({ state, width, index, appName, appId, result, executing }) {
   const theme = useTheme();
   const side = state.sidecar;
   const rows = [];
@@ -113,18 +114,37 @@ export function StepLaunch({ state, width, index, appName, result, serviceReady 
     [txt("  ")],
   );
 
-  if (result) {
+  // 这个应用到底要不要写配置文件？答案直接写在界面上，
+  // 用户不用去猜「只注入环境变量到底行不行」。
+  const app = findApp(appId ?? appName ?? "");
+  const needsSettings = app ? app.envOnlyEnough === false : false;
+  if (app) {
+    rows.push([
+      txt("  "),
+      needsSettings
+        ? txt(`▲ ${app.name} 的模型请求不认环境变量代理，所以下面只列能用的方式`, {
+            color: theme.colors.warn,
+          })
+        : txt(`✔ ${app.name} 只注入环境变量就能用`, { color: theme.colors.ok }),
+    ]);
+    rows.push([txt("  ")]);
+  }
+
+  if (executing) {
+    rows.push([txt("  "), txt(`⟳ ${executing}`, { color: theme.colors.accent, bold: true })]);
+    rows.push([txt("  ")]);
+    rows.push([txt("  "), txt("等它跑完…", { dim: true })]);
+  } else if (result) {
     rows.push([txt("  "), txt(result, { color: theme.colors.ok })]);
     rows.push([txt("  ")]);
     rows.push([txt("  "), txt("回车进入下一步", { dim: true })]);
   } else if (!side.running) {
     rows.push([txt("  "), txt("回车启动转发服务", { dim: true })]);
   } else {
-    const labelWidth = Math.max(...ACTIONS.map((a) => a.label.length)) + 2;
-    ACTIONS.forEach((action, i) => {
-      rows.push(
-        option(theme, i === index, action.label, action.detail, labelWidth),
-      );
+    const actions = actionsFor(app?.id);
+    const labelWidth = Math.max(...actions.map((a) => a.label.length)) + 2;
+    actions.forEach((action, i) => {
+      rows.push(option(theme, i === index, action.label, action.detail, labelWidth));
     });
   }
 

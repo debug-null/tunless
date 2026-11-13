@@ -299,6 +299,44 @@ test("向导第 2 步执行后显示结果并提示进入下一步", async () =>
   assert.match(text, /回车进入下一步/);
 });
 
+test("第 2 步按应用过滤选项：Cursor 不给「只注入环境变量」这个没用��选项", async () => {
+  const antigravity = await shot(
+    h(
+      Box,
+      { flexDirection: "column", width: 120 },
+      h(StepLaunch, {
+        state: baseState,
+        width: 120,
+        index: 0,
+        appName: "Antigravity",
+        appId: "antigravity",
+        result: null,
+      }),
+    ),
+  );
+  assert.match(antigravity, /Antigravity 只注入环境变量就能用/);
+  assert.match(antigravity, /只注入代理环境变量后启动/);
+
+  const cursor = await shot(
+    h(
+      Box,
+      { flexDirection: "column", width: 120 },
+      h(StepLaunch, {
+        state: baseState,
+        width: 120,
+        index: 0,
+        appName: "Cursor",
+        appId: "cursor",
+        result: null,
+      }),
+    ),
+  );
+  assert.match(cursor, /Cursor 的模型请求不认环境变量代理/);
+  // Cursor 的列表里不该再出现「只注入代理环境变量」——它对 Cursor 是没用的
+  assert.doesNotMatch(cursor, /只注入代理环境变量后启动/);
+  assert.match(cursor, /注入环境变量 \+ 写入代理配置后启动/);
+});
+
 test("向导第 3 步显示实测结果", async () => {
   const text = await shot(
     h(
