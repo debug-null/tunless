@@ -25,6 +25,8 @@ import {
 } from "./steps.js";
 import { HelpPanel } from "./help.js";
 import { Dashboard } from "./screens/dashboard.js";
+import { ServiceScreen } from "./screens/service.js";
+import { DomainsScreen } from "./screens/domains.js";
 import { KeyBar } from "./components/key-bar.js";
 import { EventFeed } from "./components/event-feed.js";
 import { actionsFor } from "./app-menu.js";
@@ -58,11 +60,13 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const theme = useTheme();
 
   const [state, setState] = useState(emptyState);
-  // 屏幕路由：dashboard 是家，wizard 是五步向导。
-  // service/upstream/apps/domains 钻取屏后续版本再落，键位先不占。
+  // 屏幕路由：dashboard 是家，wizard 是五步向导，service/domains 是钻取屏。
+  // upstream/apps 屏下一个任务才落，回车/u 现在给一句实话提示。
   const [screen, setScreen] = useState("dashboard");
-  // 仪表盘高亮行（0..ROW_ORDER.length-1），钻取屏进来前先当选择器养着
+  // 仪表盘高亮行（0..ROW_ORDER.length-1），回车按它钻进对应屏
   const [rowIndex, setRowIndex] = useState(0);
+  // 服务与日志屏的事件回看偏移：0 贴最新，↑ 往回翻
+  const [eventScroll, setEventScroll] = useState(0);
   // 向导内部状态：wizardStep 是当前第几步，wizardDone 是收尾页。
   const [wizardStep, setWizardStep] = useState(1);
   const [wizardDone, setWizardDone] = useState(false);
@@ -732,7 +736,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       return;
     }
 
-    // ---- 仪表盘：↑↓ 只是行高亮（钻取屏后续再接回车），g 进向导 ----------
+    // ---- 仪表盘：↑↓ 走行高亮，回车钻取选中行，d/l 直通两屏，g 进向导 ----
     if (screen === "dashboard") {
       if (input === "g") {
         setScreen("wizard");
@@ -743,12 +747,89 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         setHint("");
         return;
       }
+      if (input === "d") {
+        setScreen("domains");
+        setHint("");
+        return;
+      }
+      if (input === "l") {
+        // l = 服务与日志屏（设计稿里 Enter 或 l 都能进）
+        setEventScroll(0);
+        setScreen("service");
+        setHint("");
+        return;
+      }
+      if (input === "u") {
+        // 上游屏在 Task 6 才落地 —— 先给句实话，别让键死着。
+        setHint("上游详情屏还没建好 · 换上游请按 g 走向导第 2 步");
+        return;
+      }
+      if (key.return) {
+        const rowId = ROW_ORDER[rowIndex];
+        if (rowId === "service") {
+          setEventScroll(0);
+          setScreen("service");
+          setHint("");
+          return;
+        }
+        if (rowId === "internal") {
+          setScreen("domains");
+          setHint("");
+          return;
+        }
+        // upstream / tools 的详情屏在 Task 6 落地，回车先报到，不装死。
+        setHint(
+          rowId === "upstream"
+            ? "上游详情屏还没建好 · 换上游请按 g 走向导第 2 步"
+            : "工具详情屏还没建好 · 操作应用请按 g 走向导",
+        );
+        return;
+      }
       if (key.upArrow || input === "k") {
         setRowIndex((i) => Math.max(0, i - 1));
         return;
       }
       if (key.downArrow || input === "j") {
         setRowIndex((i) => Math.min(ROW_ORDER.length - 1, i + 1));
+        return;
+      }
+      return;
+    }
+
+    // ---- 服务与日志屏：↑↓ 翻事件历史；s 启停是全局键不重复接 ----------
+    if (screen === "service") {
+      if (key.escape) {
+        setScreen("dashboard");
+        return;
+      }
+      if (key.upArrow || input === "k") {
+        setEventScroll((n) => Math.min(Math.max(0, events.length - 1), n + 1));
+        return;
+      }
+      if (key.downArrow || input === "j") {
+        setEventScroll((n) => Math.max(0, n - 1));
+        return;
+      }
+      return;
+    }
+
+    // ---- 域名与规则屏：↑↓ 选手写规则，d 删；a 加规则是全局键不重复接 ----
+    if (screen === "domains") {
+      if (key.escape) {
+        setScreen("dashboard");
+        return;
+      }
+      if (input === "d") {
+        deleteRule();
+        return;
+      }
+      const total = flatRules().length;
+      if (key.upArrow || input === "k") {
+        setRuleIndex((i) => Math.max(0, i - 1));
+        return;
+      }
+      if (key.downArrow || input === "j") {
+        setRuleIndex((i) => Math.min(Math.max(0, total - 1), i + 1));
         return;
       }
       return;
@@ -965,6 +1046,10 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     body = h(HelpPanel, { width });
   } else if (screen === "dashboard") {
     body = h(Dashboard, { state, rowIndex, width, events });
+  } else if (screen === "service") {
+    body = h(ServiceScreen, { state, width, events, eventScroll, rows });
+  } else if (screen === "domains") {
+    body = h(DomainsScreen, { state, width, ruleIndex, rules: flatRules() });
   } else if (wizardDone) {
     body = h(StepDone, { state, width, appName, reachability: reach });
   } else if (wizardStep === 1) {
@@ -1025,14 +1110,19 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
                   : "h 看用法 · a 手写内网域名 · r 刷新 · q 退出"),
   );
 
-  // 最近几条事件走 EventFeed 组件。仪表盘自己在正文里就带了一份事件流，
-  // 底部再给向导屏留一份；仪表盘底栏换成固定的 KeyBar，
+  // 最近几条事件走 EventFeed 组件。仪表盘/服务屏自己在正文里就带了事件流，
+  // 底部再给向导屏与域名屏留一份；各屏底栏换成自己的 KeyBar，
   // hint（修复/启停的结果）有值时在 KeyBar 上方露一行，别只进事件流。
-  // 帮助打开时始终走 help 文案 —— HelpPanel 自己不写「Esc 返回」。
+  // 帮助打开或正在输入时始终走 help 文案 —— HelpPanel 自己不写「Esc 返回」。
+  const idle = !helpOpen && !editing && !editingTarget && !editingUpstream;
   const footer =
-    screen === "dashboard" && !helpOpen && !editing && !editingTarget && !editingUpstream
+    screen === "dashboard" && idle
       ? h(KeyBar, { keys: DASHBOARD_KEYS })
-      : help;
+      : screen === "service" && idle
+        ? h(KeyBar, { keys: SERVICE_KEYS })
+        : screen === "domains" && idle
+          ? h(KeyBar, { keys: DOMAINS_KEYS })
+          : help;
 
   return h(
     Box,
@@ -1056,7 +1146,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     h(
       Box,
       { flexDirection: "column" },
-      screen === "dashboard"
+      screen === "dashboard" || screen === "service"
         ? hint
           ? h(Text, { dimColor: true }, ` ${hint}`)
           : null
@@ -1078,14 +1168,28 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   );
 }
 
-// 仪表盘底栏按键：只列现在真能用的（d/u/l 等钻取屏落了再补）
+// 仪表盘底栏按键：只列现在真能用的（u 等 T6 屏落了再补）
 const DASHBOARD_KEYS = [
   ["↑↓", "选择"],
+  ["回车", "详情"],
   ["g", "向导"],
   ["s", "启停"],
   ["f", "修复"],
   ["r", "刷新"],
   ["q", "退出"],
+];
+
+const SERVICE_KEYS = [
+  ["s", "启停"],
+  ["↑↓", "滚动"],
+  ["Esc", "返回"],
+];
+
+const DOMAINS_KEYS = [
+  ["a", "加规则"],
+  ["d", "删选中"],
+  ["↑↓", "选择"],
+  ["Esc", "返回"],
 ];
 
 /**
