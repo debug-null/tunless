@@ -274,6 +274,13 @@ export async function proxyPortsForPids(pids) {
 const KNOWN_PROXY_PORTS = new Set([7897, 7890, 7891, 8899, 8898, 1080, 1087, 10808, 8080, 8888]);
 
 /**
+ * 代理程序的名字特征。用来回答「这个端口是谁在监听」——
+ * 只有 mihomo / clash / tunless(node) 这类才可能是代理；
+ * Antigravity 连的 MCP 服务端口（比如 magpie 的 3425）不是。
+ */
+const PROXY_LISTENER = /^(node|mihomo|clash|clash-verge|verge-mihomo|sing-box|v2ray|xray|hysteria|tuic|gost|privoxy|squid)$/i;
+
+/**
  * 从 `lsof -nP -iTCP` 的输出里挑出「连到本地代理」的端口号。
  *
  * 这里要过滤两类噪音，否则 Electron 应用会把界面骗了：
@@ -286,18 +293,24 @@ export function parseProxyPorts(lsofOutput, pids) {
   if (!wanted.size) return [];
 
   const ownPorts = new Set();
+  // 端口 → 监听它的程序名。lsof 一次就带回来了，不用额外跑命令。
+  const listeners = new Map();
   const rows = [];
   for (const line of String(lsofOutput).split("\n")) {
     const cols = line.trim().split(/\s+/);
     if (cols.length < 9) continue;
-    const pid = Number(cols[1]);
-    if (!wanted.has(pid)) continue;
-    rows.push(cols);
     // 应用自己监听的端口是内部 IPC，不是代理
     if ((cols[9] ?? "").startsWith("(LISTEN)")) {
       const local = /:(\d+)$/.exec(cols[8] ?? "");
-      if (local) ownPorts.add(Number(local[1]));
+      if (local) {
+        const port = Number(local[1]);
+        listeners.set(port, cols[0]);
+        if (wanted.has(Number(cols[1]))) ownPorts.add(port);
+      }
     }
+    const pid = Number(cols[1]);
+    if (!wanted.has(pid)) continue;
+    rows.push(cols);
   }
 
   const ports = new Set();
@@ -307,7 +320,12 @@ export function parseProxyPorts(lsofOutput, pids) {
     if (!m) continue;
     const port = Number(m[1]);
     if (ownPorts.has(port)) continue;
-    if (port >= 49152 && !KNOWN_PROXY_PORTS.has(port)) continue;
+    // 已知代理端口直接认；其余必须「有人监听且监听者是代理程序」，
+    // 否则 app 连的 MCP 服务、语言服务都被当成代理了。
+    if (!KNOWN_PROXY_PORTS.has(port)) {
+      const owner = listeners.get(port);
+      if (!owner || !PROXY_LISTENER.test(owner)) continue;
+    }
     ports.add(port);
   }
   return [...ports].sort((a, b) => a - b);
@@ -319,7 +337,12 @@ export function parseProxyPorts(lsofOutput, pids) {
  */
 export function proxyVerdict({ pids = [], ports = [] }, tunlessPort = 8899) {
   if (!pids.length) return { state: "not-running", ports };
-  if (ports.includes(tunlessPort)) return { state: "ok", ports };
+  if (ports.includes(tunlessPort)) {
+    // 同时连着旧代理，说明还有重启前留下的子进程。
+    // 这种「一半走新代理」的状态最容易被误认为正常。
+    const stale = ports.filter((p) => p !== tunlessPort);
+    return { state: "ok", ports, stale };
+  }
   if (ports.length) return { state: "stale", ports };
   // 进程在跑但此刻没有走代理的连接（可能只是还没发请求）
   return { state: "unknown", ports };
@@ -625,11 +648,21 @@ export async function mainPid(app) {
   // CLI 工具（codex）跑完就退出，没有长期驻留的主进程
   if (app?.bin) return null;
   try {
-    const { stdout } = await exec("pgrep", ["-f", `${app.bundle}.app/Contents/MacOS/${app.bundle}$`], {
-      timeout: 5000,
+    // 不能用 pgrep -f "…/Applications/X.app/…" 这种写死路径：
+    // 应用可能装在 ~/Applications 或别的地方，路径一不匹配就查不到进程，
+    // 于是「退出应用」被当成「本来就没开」，最后 open -a 只是把旧窗口
+    // 提到前台 —— 看起来就是「根本没有重启，也没有带上代理」。
+    const { stdout } = await exec("ps", ["-Ao", "pid=,command="], {
+      timeout: 8000,
+      maxBuffer: 32 * 1024 * 1024,
     });
-    const pid = stdout.trim().split("\n")[0];
-    return pid ? Number(pid) : null;
+    const suffix = `/${app.bundle}.app/Contents/MacOS/${app.bundle}`;
+    const line = stdout
+      .split("\n")
+      .find((l) => l.includes(suffix) && l.trim().split(/\s+/).length > 1);
+    if (!line) return null;
+    const pid = Number(line.trim().split(/\s+/)[0]);
+    return Number.isFinite(pid) && pid > 0 ? pid : null;
   } catch {
     return null;
   }
@@ -684,8 +717,29 @@ export async function quitApp(app, { timeoutMs = 20000 } = {}) {
   return { quit: false, pid, escalated: true };
 }
 
+/**
+ * 用代理环境变量拉起应用。
+ *
+ * `open --env` 是 macOS 13 起才有的参数。更老的系统会直接报
+ * `unrecognized option '--env'` —— 整个 open 都会失败，应用根本不会启动。
+ * 所以这里必须分两步：带 env 失败就退回普通启动，并把「环境变量没带上」
+ * 如实告诉调用方，而不是假装成功。
+ */
 export async function openApp(app, env) {
-  const args = ["-a", app.bundle];
-  for (const [key, value] of Object.entries(env ?? {})) args.push("--env", `${key}=${value}`);
-  await exec("open", args, { timeout: 20000 });
+  const bundle = app.bundle ?? app;
+  const envArgs = Object.entries(env ?? {}).flatMap(([k, v]) => ["--env", `${k}=${v}`]);
+
+  if (envArgs.length) {
+    try {
+      await exec("open", ["-a", bundle, ...envArgs], { timeout: 20000 });
+      return { launched: true, envApplied: true };
+    } catch (err) {
+      const msg = String(err?.stderr ?? err?.message ?? "");
+      // 只有「不认识 --env」才值得退回；其它错误（比如应用不存在）照实抛。
+      if (!/unrecognized option|unknown option|--env/i.test(msg)) throw err;
+    }
+  }
+
+  await exec("open", ["-a", bundle], { timeout: 20000 });
+  return { launched: true, envApplied: false };
 }

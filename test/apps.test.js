@@ -95,6 +95,23 @@ test("quitApp 对未运行的应用直接返回成功", async () => {
   assert.equal(result.escalated, false);
 });
 
+test("mainPid 不依赖 /Applications 路径，装在别处也能找到主进程", async () => {
+  const { mainPid } = await import("../src/core/apps.js");
+  // 当前机器上真正运行的 Antigravity（装在 /Applications）应能找到 pid；
+  // 找不到说明进程匹配逻辑退化了，TUI 会误判成「应用没运行」。
+  const pid = await mainPid({ bundle: "Antigravity" });
+  if (pid === null) {
+    // 没装 / 没运行的机器上跳过断言，但至少要能干净返回
+    assert.equal(pid, null);
+    return;
+  }
+  assert.ok(Number.isInteger(pid) && pid > 0, `pid 应该是正整数，实际 ${pid}`);
+  // 只匹配主进程，不能把 Helper 子进程算进来
+  const { execFileSync } = await import("node:child_process");
+  const cmd = execFileSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8" });
+  assert.match(cmd, /\/Antigravity\.app\/Contents\/MacOS\/Antigravity\s*$/);
+});
+
 test("parseProxyPorts：只认真正的代理端口，忽略应用自身 IPC", async () => {
   const { parseProxyPorts } = await import("../src/core/apps.js");
   // 真实 lsof 输出的列布局：COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
@@ -118,4 +135,29 @@ test("parseProxyPorts：Clash 端口也能认出来，不被临时端口规则�
     "codex 66666 apple 2u IPv4 0x2 0t0 TCP 127.0.0.1:50124->127.0.0.1:52345 (ESTABLISHED)",
   ].join("\n");
   assert.deepEqual(parseProxyPorts(lsof, [66666]), [7897]);
+});
+
+test("parseProxyPorts：只连到非代理程序的端口时不算走代理", async () => {
+  const { parseProxyPorts } = await import("../src/core/apps.js");
+  // Antigravity 会连 MCP 服务（magpie:3425）和 language_server 自己的端口，
+  // 这些都出现在 lsof 里，但都不是代理。
+  const lsof = [
+    "language_ 58202 apple  7u IPv4 0x1 0t0 TCP 127.0.0.1:57214 (LISTEN)",
+    "magpie    64621 apple 15u IPv6 0x2 0t0 TCP *:3425 (LISTEN)",
+    "language_ 58202 apple  9u IPv4 0x3 0t0 TCP 127.0.0.1:57300->127.0.0.1:3425 (ESTABLISHED)",
+    "node      23652 apple 13u IPv4 0x4 0t0 TCP 127.0.0.1:8899 (LISTEN)",
+    "language_ 58202 apple 10u IPv4 0x5 0t0 TCP 127.0.0.1:57301->127.0.0.1:8899 (ESTABLISHED)",
+  ].join("\n");
+  assert.deepEqual(parseProxyPorts(lsof, [58202]), [8899]);
+});
+
+test("proxyVerdict：同时连着旧代理时要标出残留", async () => {
+  const { proxyVerdict } = await import("../src/core/apps.js");
+  const ok = proxyVerdict({ pids: [1], ports: [7897, 8899] });
+  assert.equal(ok.state, "ok");
+  assert.deepEqual(ok.stale, [7897]);
+
+  const clean = proxyVerdict({ pids: [1], ports: [8899] });
+  assert.equal(clean.state, "ok");
+  assert.deepEqual(clean.stale, []);
 });

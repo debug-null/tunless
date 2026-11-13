@@ -552,7 +552,15 @@ export async function cmdLaunch(args) {
     say(dim(`    注意：${app} 忽略了正常退出请求，已强制关闭以便带代理重启`));
   }
   await new Promise((r) => setTimeout(r, target?.settingsPath ? 2000 : 800));
-  await openApp({ bundle: app.replace(/\.app$/, "") }, env);
+  const opened = await openApp({ bundle: app.replace(/\.app$/, "") }, env);
+  if (opened.launched === false) {
+    say(`  ${bad(`${app.replace(/\.app$/, "")} 没能启动`)}`);
+    return 1;
+  }
+  if (opened.envApplied === false) {
+    say(`  ${warn("这个 macOS 版本不支持 open --env，应用已启动但没带上代理环境变量")}`);
+    say(dim("    请在应用自己的设置里配置代理，或升级到 macOS 13 以上"));
+  }
   say(`\n  ${ok(`已使用 tunless 代理启动 ${app.replace(/\.app$/, "")}`)}\n`);
   return 0;
 }

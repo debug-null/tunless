@@ -24,7 +24,7 @@ import {
 } from "./steps.js";
 import { HelpPanel } from "./help.js";
 import { actionsFor } from "./app-menu.js";
-import { APPS, findApp, appProxyPorts, proxyVerdict } from "../core/apps.js";
+import { APPS, findApp, appProxyPorts, proxyVerdict, mainPid } from "../core/apps.js";
 import { addRule, removeRule, saveRules, loadRules, RULE_KINDS } from "../core/rules.js";
 import { markSeen } from "./first-run.js";
 import { collectState, emptyState } from "./state.js";
@@ -138,18 +138,25 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const runProxy = useCallback(async () => {
     if (state.sidecar.running) {
       log("转发服务已在运行", "warn");
-      return;
+      return true;
     }
     log("正在启动转发服务…", "info");
-    if (!state.sidecar.installed) {
-      const { cmdService, setQuiet } = await import("../cli.js");
-      setQuiet(true);
-      await cmdService({ _: ["service", "install"] }, { quiet: true });
-    } else {
-      await startService();
+    try {
+      if (!state.sidecar.installed) {
+        const { cmdService, setQuiet } = await import("../cli.js");
+        setQuiet(true);
+        await cmdService({ _: ["service", "install"] }, { quiet: true });
+      } else {
+        await startService();
+      }
+    } catch (err) {
+      log(`转发服务启动失败：${err.message}`, "bad");
+      setHint(`转发服务启动失败：${err.message}`);
+      return false;
     }
     log("转发服务已启动", "ok");
     await refresh();
+    return true;
   }, [state.sidecar.running, state.sidecar.installed, log, refresh]);
 
   const runService = useCallback(async () => {
@@ -187,7 +194,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       log(`正在以 tunless 代理重启 ${app}…`, "info");
       const { cmdLaunch, setQuiet } = await import("../cli.js");
       setQuiet(true);
-      await cmdLaunch(
+      const code = await cmdLaunch(
         {
           _: ["launch"],
           flags: {
@@ -199,8 +206,26 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         },
         { quiet: true },
       );
-      log(`${app} 已重启`, "ok");
+      if (code !== 0) {
+        log(`${app} 启动失败（退出码 ${code}）`, "bad");
+        await refresh();
+        return { ok: false, code };
+      }
+
+      // 不要只相信「命令跑完没报错」。真的去看进程在不在 ——
+      // 之前 open 失败被吞掉，界面照样说「已重启」，用户看到的就是
+      // 「根本没自动拉起」。
+      const target = findApp(app);
+      const alive = target ? await mainPid(target) : null;
+      if (!alive) {
+        log(`${app} 没有起来：没找到运行中的进程`, "bad");
+        await refresh();
+        return { ok: false, reason: "not-running" };
+      }
+
+      log(`${app} 已重启（pid ${alive}）`, "ok");
       await refresh();
+      return { ok: true, pid: alive };
     },
     [internalDns, includeChrome, log, refresh],
   );
@@ -210,12 +235,21 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     async (app, actionId) => {
       if (!app) return null;
       if (actionId === "env" || actionId === "env+settings") {
-        await launchApp(app.name, { writeSettings: actionId === "env+settings" });
+        const launched = await launchApp(app.name, { writeSettings: actionId === "env+settings" });
+        if (!launched?.ok) {
+          setHint(
+            app.id === "codex" || app.name === "Codex"
+              ? "写入 .env 失败，检查一下文件权限"
+              : `${app.name} 没能启动。手动打开它，或用 tunless launch ${app.name} 看详细报错`,
+          );
+          // 返回 null 表示「这一步没成功」：界面不该打勾，用户应该能重试。
+          return null;
+        }
         return app.id === "codex" || app.name === "Codex"
           ? "Codex 的代理已写入 .env，新开终端跑 codex 就生效"
           : actionId === "env"
-            ? `${app.name} 已带代理启动`
-            : `${app.name} 已带代理启动，并写入代理配置`;
+            ? `${app.name} 已带代理启动（pid ${launched.pid}）`
+            : `${app.name} 已带代理启动（pid ${launched.pid}），并写入代理配置`;
       }
       // Codex 的「只给我环境变量」：打印出来，不写文件
       if (actionId === "env" && (app.id === "codex" || app.name === "Codex")) {
@@ -469,8 +503,31 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
           return;
         }
         if (!state.sidecar.running) {
-          runProxy();
-          setHint("转发服务已启动，再按回车选择处理方式");
+          // 直接把这一步做完：先起服务，再接着启动应用。
+          // 之前这里只启动服务就 return 了，用户按了回车却什么也没发生，
+          // 看起来就是「根本不会自动拉起」。
+          setBusy(true);
+          setExecuting("正在启动转发服务…");
+          runProxy()
+            .then(async (started) => {
+              if (!started) return;
+              const app = findApp(appId) ?? { name: appName, id: appId };
+              const action = actionsFor(appId)[actionIndex];
+              if (!action) return;
+              setExecuting(
+                action.id === "settings"
+                  ? `正在写入 ${appName} 的代理配置…`
+                  : `正在以 tunless 代理重启 ${appName}…`,
+              );
+              const result = await applyAppAction(app, action.id);
+              if (result) setStepResult(`✔ ${result}`);
+              await refreshLive();
+            })
+            .catch((err) => setHint(`操作失败：${err.message}`))
+            .finally(() => {
+              setBusy(false);
+              setExecuting(null);
+            });
           return;
         }
         const app = findApp(appId) ?? { name: appName, id: appId };

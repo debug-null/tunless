@@ -151,11 +151,14 @@ export function StepLaunch({ state, width, index, appName, appId, result, execut
     const verdict = live?.verdict;
     if (verdict) {
       const portText = (verdict.ports ?? []).map((p) => `127.0.0.1:${p}`).join("、");
+      const staleText = (verdict.stale ?? []).map((p) => `127.0.0.1:${p}`).join("、");
       rows.push([
         txt("  "),
         txt(padEnd("实际连接", 12), { dim: true }),
-        verdict.state === "ok"
-          ? txt("已走 127.0.0.1:8899", { color: theme.colors.ok })
+        verdict.state === "ok" && staleText
+          ? txt(`已走 127.0.0.1:8899，但还有旧连接 ${staleText}`, { color: theme.colors.warn })
+          : verdict.state === "ok"
+            ? txt("已走 127.0.0.1:8899", { color: theme.colors.ok })
           : verdict.state === "stale"
             ? txt(`还连着 ${portText}，需要重启`, { color: theme.colors.warn })
             : verdict.state === "not-running"
