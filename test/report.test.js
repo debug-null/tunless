@@ -52,5 +52,5 @@ test("verdict/section/suggest 形状", () => {
   rep.suggest("tunless service start");
   assert.equal(lines[0], " ● 一切正常");
   assert.equal(lines[2], "── 环境 ──");
-  assert.equal(lines[3], "    → tunless service start");
+  assert.equal(lines[3], "    › tunless service start");
 });
