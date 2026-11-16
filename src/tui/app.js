@@ -326,6 +326,26 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const applyAppAction = useCallback(
     async (app, actionId) => {
       if (!app) return null;
+      // 转发服务停着就把应用重启成走 :8899，等于亲手断网 —— 先把它拉起来。
+      // 放这一层而不是调用方：工作台回车和向导第 3 步共用同一份保护。
+      if (!state.sidecar.running) {
+        setExecuting("转发服务没在跑，先启动它…");
+        try {
+          if (!state.sidecar.installed) {
+            const { cmdService, setQuiet } = await import("../cli.js");
+            setQuiet(true);
+            await cmdService({ _: ["service", "install"] }, { quiet: true });
+          } else {
+            await startService();
+          }
+          await refresh();
+          log("转发服务已启动", "ok");
+        } catch (err) {
+          setHint(`转发服务起不来：${err.message}，先解决它再配应用`);
+          log(`转发服务启动失败：${err.message}`, "bad");
+          return null;
+        }
+      }
       if (actionId === "env" || actionId === "env+settings") {
         const launched = await launchApp(app.name, { writeSettings: actionId === "env+settings" });
         if (!launched?.ok) {
@@ -388,7 +408,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       }
       return null;
     },
-    [launchApp, hint],
+    [launchApp, hint, state.sidecar.running, state.sidecar.installed, log, refresh],
   );
 
   /**
@@ -527,6 +547,8 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   // 把回调放进 ref，挂载效果只认 ref。
   const appIdRef = useRef(null);
   const latest = useRef({});
+  // 停服二次确认的时间戳：第一次按只提示，4 秒内再按才真停。
+  const stopConfirmAt = useRef(0);
   useEffect(() => {
     appIdRef.current = appId;
     latest.current = { refresh, runReach, refreshLive, log };
@@ -741,6 +763,14 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       return;
     }
     if (input === "s" || input === "S" || input === " ") {
+      // 停服 = 断掉所有已代理工具的网，误触一次代价太大 —— 要停就在
+      // 4 秒内再按一次确认；启动没有副作用，保持一键。
+      if (state.sidecar.running && Date.now() - stopConfirmAt.current > 4000) {
+        stopConfirmAt.current = Date.now();
+        setHint("再按一次空格/S 确认停止转发服务（所有代理工具会断网）");
+        return;
+      }
+      stopConfirmAt.current = 0;
       runService();
       return;
     }
