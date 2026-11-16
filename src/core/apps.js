@@ -243,18 +243,38 @@ export async function appProxyPorts(app) {
       : [`/${app.bundle}.app/`];
 
   try {
-    const { stdout } = await exec("ps", ["-Ao", "pid=,command="], {
+    const { stdout } = await exec("ps", ["-Ao", "pid=,ppid=,command="], {
       timeout: 8000,
       maxBuffer: 32 * 1024 * 1024,
     });
-    const pids = stdout
-      .split("\n")
-      .filter((line) => targets.some((t) => line.includes(t)))
-      .map((line) => Number(line.trim().split(/\s+/)[0]))
-      .filter((n) => Number.isFinite(n) && n > 0);
+    // Electron 的 utility 子进程（network service、mcp、conversation-search…）
+    // argv0 是重写过的「Cursor Helper: xxx」，命令行里根本没有 .app 路径——
+    // 只按路径匹配会把它们漏掉，而持网的恰恰是这类进程。
+    // 所以按进程树收：路径命中的做种子，往下把子孙进程全带上。
+    const childrenOf = new Map();
+    const seeds = [];
+    for (const line of stdout.split("\n")) {
+      const m = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
+      if (!m) continue;
+      const pid = Number(m[1]);
+      const ppid = Number(m[2]);
+      if (!childrenOf.has(ppid)) childrenOf.set(ppid, []);
+      childrenOf.get(ppid).push(pid);
+      if (targets.some((t) => m[3].includes(t))) seeds.push(pid);
+    }
+    const pids = new Set(seeds);
+    const queue = [...seeds];
+    while (queue.length) {
+      for (const child of childrenOf.get(queue.shift()) ?? []) {
+        if (!pids.has(child)) {
+          pids.add(child);
+          queue.push(child);
+        }
+      }
+    }
 
-    const { ports, byPid, error } = await proxyPortsForPids(pids);
-    return { pids, ports, byPid, error };
+    const { ports, byPid, error } = await proxyPortsForPids([...pids]);
+    return { pids: [...pids], ports, byPid, error };
   } catch {
     return { pids: [], ports: [], byPid: new Map(), error: true };
   }
