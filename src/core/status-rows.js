@@ -14,6 +14,14 @@ function serviceRow(state) {
   const s = state?.sidecar ?? {};
   if (state?.loading) return row("service", "unknown", "探测中");
   if (s.running) {
+    // 守护进程跑的不是当前安装版 —— 界面功能全在，代码却是旧的。
+    // 「升了级怎么还没好」九成是这个，必须喊出来。
+    if (s.staleCode) {
+      const ver = s.runtimeVersion ? `v${s.runtimeVersion}` : "旧版";
+      const cur = state?.pkgVersion ? `v${state.pkgVersion}` : "当前版";
+      return row("service", "warn",
+        `运行中 pid ${s.pid ?? "?"}，但跑的是 ${ver}（已安装 ${cur}）`, "tunless service restart");
+    }
     return row("service", "ok",
       [`运行中${s.pid ? ` pid ${s.pid}` : ""}`, `HTTP :${s.httpPort ?? 8899}`, s.socksPort ? `SOCKS :${s.socksPort}` : null]
         .filter(Boolean).join(" · "));
@@ -45,6 +53,7 @@ function toolsRow(state) {
   const parts = apps.map((a) =>
     a.proxied === "ok" ? `${a.name} 代理中`
       : a.proxied === "stale" ? `${a.name} ⚠旧代理`
+      : a.proxied === "probe-error" ? `${a.name} ?未测出`
       : a.running ? `${a.name} 未走代理`
       : `${a.name} —`);
   const stale = apps.some((a) => a.proxied === "stale");

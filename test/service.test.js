@@ -31,3 +31,13 @@ test("sidecarReachable 对未监听端口返回 false 而不是抛错", async ()
   await new Promise((resolve) => server.close(resolve));
   assert.equal(await sidecarReachable("127.0.0.1", port, 500), false);
 });
+
+test("writeRuntime 给快照盖版本章 —— 漂移检测靠它区分新旧守护进程", async () => {
+  const { writeRuntime, readRuntime, clearRuntime, packageVersion } = await import("../src/core/paths.js");
+  writeRuntime({ httpPort: 8899, socksPort: 8898 });
+  const rt = readRuntime();
+  clearRuntime();
+  assert.equal(rt.version, packageVersion());
+  assert.ok(rt.pid > 0);
+  assert.ok(rt.startedAt);
+});

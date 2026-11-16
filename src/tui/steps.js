@@ -175,7 +175,9 @@ export function StepLaunch({ state, width, index, appName, appId, result, execut
             ? txt(`还连着 ${portText}，需要重启`, { color: theme.colors.warn })
             : verdict.state === "not-running"
               ? txt("应用没在运行", { dim: true })
-              : txt("此刻没有代理连接（可能还没发请求）", { dim: true }),
+              : verdict.state === "probe-error"
+                ? txt("连接探测没跑成，回车刷新重试", { color: theme.colors.warn })
+                : txt("此刻没有代理连接（可能还没发请求）", { dim: true }),
       ]);
     }
 

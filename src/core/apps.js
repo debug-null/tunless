@@ -253,16 +253,19 @@ export async function appProxyPorts(app) {
       .map((line) => Number(line.trim().split(/\s+/)[0]))
       .filter((n) => Number.isFinite(n) && n > 0);
 
-    const { ports, byPid } = await proxyPortsForPids(pids);
-    return { pids, ports, byPid };
+    const { ports, byPid, error } = await proxyPortsForPids(pids);
+    return { pids, ports, byPid, error };
   } catch {
-    return { pids: [], ports: [], byPid: new Map() };
+    return { pids: [], ports: [], byPid: new Map(), error: true };
   }
 }
 
 /**
  * 一次 lsof 取回所有进程的已建立连接，再按 pid 过滤。
  * 逐个 pid 调 lsof 在 Electron 应用上要跑十几次，慢到界面会卡住。
+ *
+ * lsof 失败要带上 error —— 「探测没跑成」和「跑成了但没连接」是
+ * 两种完全不同的结论，吞掉的话界面会把前者谎报成「未走代理」。
  */
 export async function proxyPortsForPids(pids) {
   if (!pids?.length) return { ports: [], byPid: new Map() };
@@ -273,7 +276,7 @@ export async function proxyPortsForPids(pids) {
     });
     return parseProxyConnections(stdout, pids);
   } catch {
-    return { ports: [], byPid: new Map() };
+    return { ports: [], byPid: new Map(), error: true };
   }
 }
 

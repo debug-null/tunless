@@ -17,7 +17,7 @@ import { inspectProcesses } from "../core/proc.js";
 import { serviceStatus } from "../core/launchd.js";
 import { mergeHostsValidated, partitionByKind } from "../core/plan.js";
 import { loadRules, ruleSuffixes, loadLearnedSuffixes, learnSuffixes } from "../core/rules.js";
-import { readRuntime } from "../core/paths.js";
+import { readRuntime, packageVersion } from "../core/paths.js";
 import { APPS, isAppInstalled, appVersion, cliVersion, mainPid, appProxyPorts, proxyVerdict } from "../core/apps.js";
 import net from "node:net";
 
@@ -73,9 +73,12 @@ export function emptyState() {
       httpOpen: false,
       socksOpen: false,
       runtime: null,
+      runtimeVersion: null,
+      staleCode: false,
       activeSuffixes: [],
       pendingSuffixes: [],
     },
+    pkgVersion: null,
     internalDns: null,
     dnsAlive: null,
     internalDomains: [],
@@ -150,6 +153,9 @@ export async function collectState({
   state.sidecar.running = svc.running;
   state.sidecar.installed = svc.installed;
   state.sidecar.pid = svc.pid;
+  state.sidecar.runtimeVersion = svc.runtimeVersion ?? null;
+  state.sidecar.staleCode = Boolean(svc.staleCode);
+  state.pkgVersion = packageVersion();
 
   // 第二段：内核接口、应用探测、端口探活、域名扫描、进程检查并发跑。
   // 域名分类前先用一次活性探测确认内网 DNS 活着 —— 不通就跳过整段，
@@ -188,7 +194,11 @@ export async function collectState({
         if (pid) {
           try {
             const conn = await appProxyPorts(app);
-            const verdict = proxyVerdict(conn, state.sidecar.httpPort);
+            // 探测本身失败（lsof 超时/被掐）和「探测成功但没连接」是两回事：
+            // 前者说「没测出来」，后者才是「没走代理」——混着说会谎报。
+            const verdict = conn.error
+              ? { state: "probe-error", ports: conn.ports }
+              : proxyVerdict(conn, state.sidecar.httpPort);
             proxied = verdict.state;
           } catch {
             proxied = null;

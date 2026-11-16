@@ -78,3 +78,37 @@ test("loading：全 unknown，判决不报警", () => {
   assert.ok(rows.every((r) => r.status === "unknown"));
   assert.equal(verdictFor({ loading: true }).tone, "info");
 });
+
+test("守护进程跑旧版：warn + 指明版本与 restart 动作", () => {
+  const st = {
+    ...base,
+    pkgVersion: "0.11.1",
+    sidecar: { ...base.sidecar, staleCode: true, runtimeVersion: "0.10.1" },
+  };
+  const row = byId(rowsFor(st), "service");
+  assert.equal(row.status, "warn");
+  assert.match(row.detail, /0\.10\.1/);
+  assert.match(row.detail, /0\.11\.1/);
+  assert.match(row.action, /service restart/);
+  assert.equal(verdictFor(st).tone, "warn");
+});
+
+test("守护进程版本字段缺失（旧版无记录）：也报 warn", () => {
+  const st = {
+    ...base,
+    pkgVersion: "0.11.1",
+    sidecar: { ...base.sidecar, staleCode: true, runtimeVersion: null },
+  };
+  const row = byId(rowsFor(st), "service");
+  assert.equal(row.status, "warn");
+  assert.match(row.detail, /旧版/);
+});
+
+test("工具探测失败：标「未测出」而不是谎报「未走代理」", () => {
+  const st = { ...base, apps: [{ ...base.apps[0], proxied: "probe-error" }, base.apps[1]] };
+  const row = byId(rowsFor(st), "tools");
+  assert.match(row.detail, /Antigravity \?未测出/);
+  assert.doesNotMatch(row.detail, /Antigravity 未走代理/);
+  // 探测失败不拖整行：另一个应用 ok 则行仍 ok
+  assert.equal(row.status, "ok");
+});

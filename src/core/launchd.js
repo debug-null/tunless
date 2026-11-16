@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { dataDir } from "./paths.js";
+import { dataDir, readRuntime, packageVersion } from "./paths.js";
 
 const exec = promisify(execFile);
 
@@ -262,11 +262,19 @@ export async function serviceStatus() {
   const installed = fs.existsSync(PLIST_PATH);
   const running = /state = running/.test(stdout);
   const pidMatch = /pid = (\d+)/.exec(stdout);
+  // 版本漂移：npm 升级的是磁盘上的包，launchd 里跑的还是旧代码。
+  // 快照没写 version（早于该功能的版本）或版本不等，都算漂移——
+  // 用户升级后「还是不行」最常见的原因就是这个。
+  const runtime = running ? readRuntime() : null;
+  const pkg = packageVersion();
+  const runtimeVersion = running ? (runtime?.version ?? null) : null;
   return {
     installed,
     running,
     pid: pidMatch ? Number(pidMatch[1]) : null,
     plist: PLIST_PATH,
+    runtimeVersion,
+    staleCode: Boolean(running && pkg && (!runtime || runtime.version !== pkg)),
   };
 }
 

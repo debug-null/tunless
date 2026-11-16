@@ -27,7 +27,7 @@ import {
   detectPinnedDrift,
 } from "./core/upstream.js";
 import { classifyDomain, probeServer, resolve4System } from "./core/dns.js";
-import { dataDir, writeRuntime, clearRuntime } from "./core/paths.js";
+import { dataDir, writeRuntime, clearRuntime, packageVersion } from "./core/paths.js";
 import { createReporter } from "./cli/report.js";
 import { scanAll } from "./core/scan.js";
 import { inspectProcesses, proxyAdvice } from "./core/proc.js";
@@ -1667,6 +1667,13 @@ export async function cmdService(args) {
   );
   if (status.installed) {
     rep.row(status.running ? "ok" : "bad", "运行状态", status.running ? `运行中（pid ${status.pid}）` : "已安装但未运行");
+    if (status.staleCode) {
+      rep.row(
+        "warn",
+        "代码版本",
+        `守护进程跑的是 ${status.runtimeVersion ? `v${status.runtimeVersion}` : "旧版"}，已安装的是 v${packageVersion()} — tunless service restart`,
+      );
+    }
   }
   rep.suggest("tunless service install     # 开机自启，崩溃自动拉起");
   rep.suggest("tunless service start|stop|restart   # 启动 / 停止 / 重启");
@@ -1972,11 +1979,7 @@ export async function main(argv) {
   }
 
   if (args.flags.version) {
-    const { readFileSync } = await import("node:fs");
-    const pkg = JSON.parse(
-      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
-    );
-    console.log(pkg.version);
+    console.log(packageVersion());
     return 0;
   }
 

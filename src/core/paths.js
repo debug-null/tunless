@@ -52,12 +52,28 @@ export function runtimeFile() {
   return path.join(dataDir(), "runtime.json");
 }
 
+// 当前安装的包版本。runtime.json 里记它，CLI/TUI 才能发现
+// 「npm 升级了但守护进程还在跑旧代码」——这类漂移之前完全不可见，
+// 用户只会觉得「修了怎么还没好」。
+let cachedVersion;
+export function packageVersion() {
+  if (cachedVersion !== undefined) return cachedVersion;
+  try {
+    cachedVersion =
+      JSON.parse(fs.readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version ??
+      null;
+  } catch {
+    cachedVersion = null;
+  }
+  return cachedVersion;
+}
+
 export function writeRuntime(info) {
   try {
     fs.mkdirSync(dataDir(), { recursive: true });
     fs.writeFileSync(
       runtimeFile(),
-      `${JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), ...info }, null, 2)}\n`,
+      `${JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), version: packageVersion(), ...info }, null, 2)}\n`,
       "utf8",
     );
     return true;

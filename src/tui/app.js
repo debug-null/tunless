@@ -128,7 +128,14 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       // 而界面还显示「已走 8899」，完全是误导。
       const netPid = await networkPid(target);
       const env = await processProxyEnv(netPid, tunlessPort);
-      const next = { ...conn, verdict: proxyVerdict(conn, tunlessPort), netPid, env };
+      const next = {
+        ...conn,
+        verdict: conn.error
+          ? { state: "probe-error", ports: conn.ports }
+          : proxyVerdict(conn, tunlessPort),
+        netPid,
+        env,
+      };
       setLive(next);
       return next;
     } catch {

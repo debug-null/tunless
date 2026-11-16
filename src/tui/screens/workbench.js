@@ -64,6 +64,9 @@ export function Workbench({
     if (app.proxied === "stale") {
       return { text: `${symbols.warn} 还连着旧代理`, color: theme.colors.warn };
     }
+    if (app.proxied === "probe-error") {
+      return { text: "? 状态没测出来", color: theme.colors.muted };
+    }
     if (app.proxied === "unknown") {
       return { text: "? 代理状态未知", color: theme.colors.muted };
     }
@@ -79,6 +82,7 @@ export function Workbench({
       return `已走 tunless 代理（127.0.0.1:${side.httpPort ?? 8899}），回车实测连通性，不通再按一次重启修复`;
     }
     if (app.proxied === "stale") return "还连着旧代理，回车改走 tunless 并重启";
+    if (app.proxied === "probe-error") return "连接探测没跑成（lsof 没返回），回车重新注入代理";
     if (app.id === "codex") {
       return "回车把代理写入 ~/.codex/.env（终端与桌面客户端共用）";
     }
