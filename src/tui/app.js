@@ -549,6 +549,8 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const latest = useRef({});
   // 停服二次确认的时间戳：第一次按只提示，4 秒内再按才真停。
   const stopConfirmAt = useRef(0);
+  // 实测没过等着「再按一次回车重启修复」的 app.id
+  const [pendingFix, setPendingFix] = useState(null);
   useEffect(() => {
     appIdRef.current = appId;
     latest.current = { refresh, runReach, refreshLive, log };
@@ -811,21 +813,10 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         if (executing || busy) return;
         const app = apps[Math.min(appIndex, Math.max(0, apps.length - 1))];
         if (!app) return;
-        if (app.proxied === "ok") {
-          // 真测：经 sidecar 打这个工具自己的目标，不是嘴上「重测」。
-          setHint("");
-          runReach(app.id).then((r) => {
-            if (!r) return;
-            const okCount = r.results.filter((x) => x.ok).length;
-            setHint(
-              r.ok
-                ? `✔ ${app.name} 连通正常（${okCount}/${r.results.length} 个目标可达）`
-                : `✖ ${app.name} 有 ${r.results.length - okCount}/${r.results.length} 个目标不通`,
-            );
-          });
-        } else {
-          // 动作按应用挑：Codex 没有 settings.json，「注入+启动」对它没意义，
-          // actionsFor 返回的是这个应用的真实选项，第一个就是默认动作。
+
+        // 配置路径：按应用挑动作 —— Codex 没有 settings.json，「注入+启动」
+        // 对它没意义；actionsFor 返回的是这个应用的真实选项。
+        const configure = () => {
           const ids = actionsFor(app.id).map((a) => a.id);
           const actionId = ids.includes("env+settings") ? "env+settings" : ids[0];
           setHint("");
@@ -836,7 +827,35 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
               setHint(typeof res === "string" ? res : `✔ ${app.name} 代理配置已生效`);
             }
           });
+        };
+
+        // 第二阶段：上次实测没过，这次回车是「重启修复」。
+        if (pendingFix === app.id) {
+          setPendingFix(null);
+          setExecuting(`正在重启 ${app.name} 并注入代理`);
+          configure();
+          return;
         }
+
+        if (app.proxied === "ok") {
+          // 先真测：经 sidecar 打这个工具自己的目标。测的是隧道层——
+          // 隧道通但应用内部状态坏的情况也存在，所以无论结果如何，
+          // 再按一次回车都给「重启并重新注入」这条修复路径。
+          setHint("");
+          runReach(app.id).then((r) => {
+            if (!r) return;
+            const okCount = r.results.filter((x) => x.ok).length;
+            setPendingFix(app.id);
+            setHint(
+              r.ok
+                ? `✔ ${app.name} 连通正常（${okCount}/${r.results.length} 个目标可达）— 仍有问题？再按回车重启并重新注入`
+                : `✖ ${app.name} 有 ${r.results.length - okCount}/${r.results.length} 个目标不通 — 再按回车重启并注入代理`,
+            );
+          });
+          return;
+        }
+
+        configure();
         return;
       }
       if (key.upArrow || input === "k") {

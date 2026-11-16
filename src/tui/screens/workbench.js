@@ -76,7 +76,7 @@ export function Workbench({
   const detailFor = (app) => {
     if (executing) return `正在执行：${executing}…`;
     if (app.proxied === "ok") {
-      return `已走 tunless 代理（127.0.0.1:${side.httpPort ?? 8899}），回车实测连通性`;
+      return `已走 tunless 代理（127.0.0.1:${side.httpPort ?? 8899}），回车实测连通性，不通再按一次重启修复`;
     }
     if (app.proxied === "stale") return "还连着旧代理，回车改走 tunless 并重启";
     if (app.id === "codex") {
@@ -160,7 +160,14 @@ export function Workbench({
             Box,
             { marginTop: 1, paddingLeft: 2 },
             h(Text, { dimColor: true }, `${symbols.arrow} ${currentApp.name}: `),
-            h(Text, null, detailFor(currentApp)),
+            h(
+              Text,
+              null,
+              truncate(
+                detailFor(currentApp),
+                Math.max(10, width - currentApp.name.length - 6),
+              ),
+            ),
           )
         : null,
 
