@@ -11,8 +11,8 @@ import {
   codexProxyState,
 } from "../src/core/apps.js";
 
-// AppMenu 组件已删除：应用选择/处理方式菜单由 screens/apps.js 渲染，
-// 其渲染覆盖见 screens.test.js；本文件保留 actionsFor/ACTIONS 的行为测试。
+// AppMenu 组件与 apps 屏均已删除：选择/处理方式在向导第 3 步与工作台完成；
+// 本文件保留 actionsFor/ACTIONS 的行为测试。
 
 test("处理方式覆盖「不改配置」「改配置并启动」「只改配置」三种", () => {
   assert.deepEqual(ACTIONS.map((a) => a.id), ["env", "env+settings", "settings"]);

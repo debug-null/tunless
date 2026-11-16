@@ -8,7 +8,7 @@ import { getTheme } from "../src/tui/theme.js";
 import { ServiceScreen } from "../src/tui/screens/service.js";
 import { DomainsScreen } from "../src/tui/screens/domains.js";
 import { UpstreamScreen } from "../src/tui/screens/upstream.js";
-import { AppsScreen } from "../src/tui/screens/apps.js";
+// AppsScreen 已删除：应用列表与一键动作在主工作台（workbench.js）完成。
 
 const h = React.createElement;
 const wrap = (node) => h(ThemeProvider, { theme: getTheme("dark"), unicode: true }, node);
@@ -174,35 +174,4 @@ const withApps = {
     { id: "codex", name: "Codex", installed: false, running: false, proxied: "unknown" },
   ],
 };
-
-test("apps 屏 list：列出已安装应用与走代理标记", async () => {
-  const out = await shot(
-    wrap(h(AppsScreen, { state: withApps, width: 100, appIndex: 0, stage: "list" })),
-  );
-  assert.match(out, /Antigravity/);
-  assert.match(out, /已走代理/);
-  assert.match(out, /还连着旧代理/);
-  // 没装的应用不出现在列表里
-  assert.doesNotMatch(out, /Codex/);
-});
-
-test("apps 屏 actions：why 说明 + actionsFor 动作列表", async () => {
-  const out = await shot(
-    wrap(
-      h(AppsScreen, {
-        state: withApps,
-        width: 100,
-        stage: "actions",
-        appId: "antigravity",
-        appName: "Antigravity",
-        actionIndex: 0,
-        live: null,
-        result: null,
-        executing: null,
-      }),
-    ),
-  );
-  assert.match(out, /模型请求认 HTTPS_PROXY/);
-  assert.match(out, /只注入代理环境变量后启动/);
-  assert.match(out, /只写入代理配置，不启动/);
-});
+void withApps; // 保留夹具备用，apps 屏已并入工作台（workbench.test.js 覆盖）
