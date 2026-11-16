@@ -38,10 +38,17 @@ function upstreamRow(state) {
     // drift 本身就是完整原因句（「你固定的 A 还是旧客户端在用，系统代理
     // 已经切到 B」），两个端口号都在里面。
     if (u.drift) return row("upstream", "warn", u.drift, "按 u 确认");
+    // 出口地区受限：能出网，但 AI 模型目录会被服务端按地区裁剪 ——
+    // 「Gemini/Claude/GPT 不见了」的病根，比端口通不通更深一层。
+    const eg = state?.egress;
+    if (eg?.restricted) {
+      return row("upstream", "warn",
+        `${addr} · 出口${eg.country ?? "?"} — Gemini/Claude/GPT 在该区不可用`, "切上游节点");
+    }
     // detail 常自带地址（「127.0.0.1:6478 · 系统代理（HTTP）」），
     // 前缀再拼一遍就重复了 —— 以 detail 开头是地址时直接用 detail。
     const tagged = u.detail?.startsWith(addr) ? u.detail : `${addr}${u.detail ? ` · ${u.detail}` : ""}`;
-    return row("upstream", "ok", tagged);
+    return row("upstream", "ok", eg?.country ? `${tagged} · 出口${eg.country}` : tagged);
   }
   return row("upstream", "bad", "没找到可用上游", "按 u 手动选");
 }

@@ -15,6 +15,7 @@ import { classifyDomain, probeServer, resolve4System } from "../core/dns.js";
 import { scanAll } from "../core/scan.js";
 import { inspectProcesses } from "../core/proc.js";
 import { serviceStatus } from "../core/launchd.js";
+import { detectEgress } from "../core/egress.js";
 import { mergeHostsValidated, partitionByKind } from "../core/plan.js";
 import { loadRules, ruleSuffixes, loadLearnedSuffixes, learnSuffixes } from "../core/rules.js";
 import { readRuntime, packageVersion } from "../core/paths.js";
@@ -64,6 +65,7 @@ export function emptyState() {
       detail: "",
       drift: null,
     },
+    egress: null,
     sidecar: {
       running: false,
       installed: false,
@@ -372,6 +374,16 @@ export async function collectState({
   state.upstream.detail = upstreamResult.detail;
   state.upstream.drift = upstreamResult.drift ?? null;
   state.fakeCount = fakeResult;
+
+  // 出口地区：连通只能证明「能出网」，模型目录全不全看出口在哪。
+  // 15 分钟缓存，首轮探测多花 ~1s，之后免费。
+  if (state.upstream.chosen) {
+    try {
+      state.egress = await detectEgress(state.upstream.chosen);
+    } catch {
+      state.egress = null;
+    }
+  }
 
   // 运行中的服务实际加载了什么 —— 和「刚算出来的」区分开，
   // 不然界面会把还没生效的域名说成「已分流」。

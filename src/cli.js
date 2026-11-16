@@ -26,6 +26,7 @@ import {
   parseUpstream,
   detectPinnedDrift,
 } from "./core/upstream.js";
+import { detectEgress } from "./core/egress.js";
 import { classifyDomain, probeServer, resolve4System } from "./core/dns.js";
 import { dataDir, writeRuntime, clearRuntime, packageVersion } from "./core/paths.js";
 import { createReporter } from "./cli/report.js";
@@ -536,6 +537,16 @@ export async function cmdDoctor(args) {
     rep.row("ok", "上游", `${host}:${port}${why ? `（${why}）` : ""}`);
     const check = await verifyUpstream(resolved.upstream);
     rep.row(check.ok ? "ok" : "warn", "连通性", `${check.ok ? "能出网" : "此刻出不了网"}${check.detail ? ` · ${check.detail}` : ""}`);
+    // 「能出网」不代表模型目录全——出口落在受限区时 Cursor 等会缺
+    // Gemini/Claude/GPT。单列一行，别混进连通性里。
+    if (check.ok) {
+      const eg = await detectEgress(resolved.upstream);
+      if (eg?.restricted) {
+        rep.row("warn", "出口地区", `${eg.country ?? "?"} · Gemini/Claude/GPT 在该区不可用，切个美/日/新节点`);
+      } else if (eg?.country) {
+        rep.row("ok", "出口地区", `${eg.country}${eg.region ? `（${eg.region}）` : ""} · AI 模型目录完整`);
+      }
+    }
   } else {
     exitCode = 1;
     rep.row("bad", "上游", "没有找到可用的上游代理");
