@@ -682,24 +682,56 @@ export class HttpProxyServer {
       linkTunnel(socket, tunnel);
       return;
     }
+    await this.openPlainHttp(socket, head, rest, host, port);
+  }
+
+  /**
+   * 普通 HTTP 也要等上游的第一段响应。
+   * 已经把状态行写给客户端之后，不能再补一条 502/504。
+   */
+  async openPlainHttp(socket, head, rest, host, port) {
     const upstreamSocket = net.connect(this.upstream.port, this.upstream.host);
     this.track(upstreamSocket);
+    upstreamSocket.on("error", () => {});
     socket.on("close", () => {
       if (!upstreamSocket.destroyed) upstreamSocket.destroy();
     });
-    upstreamSocket.once("connect", () => {
+    let sent = false;
+    const fail = (code) => {
+      if (sent || socket.destroyed || socket.writableEnded) return;
+      sent = true;
+      gateway(socket, code);
+    };
+    const timer = setTimeout(() => {
+      if (!upstreamSocket.destroyed) upstreamSocket.destroy();
+      fail(504);
+    }, this.handshakeTimeout);
+    try {
+      await new Promise((resolve, reject) => {
+        if (upstreamSocket.readyState === "open") resolve();
+        upstreamSocket.once("connect", resolve);
+        upstreamSocket.once("error", reject);
+      });
+      if (sent) return;
       upstreamSocket.write(
         `${head.method} ${head.target} HTTP/1.1\r\n${head.headers
           .map(([n, v]) => `${n}: ${v}`)
           .join("\r\n")}\r\n\r\n`,
       );
-      upstreamSocket.write(rest ?? Buffer.alloc(0));
+      if (rest?.length) upstreamSocket.write(rest);
+      const replied = await readHeadDeadline(upstreamSocket, this.handshakeTimeout);
+      clearTimeout(timer);
+      if (sent || socket.destroyed || socket.writableEnded) return;
+      sent = true;
+      socket.write(`${replied.text}\r\n\r\n`);
+      if (replied.rest?.length) socket.write(replied.rest);
       linkTunnel(socket, upstreamSocket);
-    });
-    upstreamSocket.once("error", (err) => {
+    } catch (err) {
+      clearTimeout(timer);
+      if (!upstreamSocket.destroyed) upstreamSocket.destroy();
       this.log(`GET ${host}:${port} 上游失败：${err.message}`);
-      if (!socket.destroyed) socket.destroy();
-    });
+      fail(err.message === "timeout" ? 504 : 502);
+    }
   }
 }
 

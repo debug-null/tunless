@@ -10,15 +10,102 @@ import zlib from "node:zlib";
 import { execFileSync } from "node:child_process";
 
 const certDir = fs.mkdtempSync(path.join(os.tmpdir(), "tunless-round1-"));
-const certPath = path.join(certDir, "cert.pem");
-const keyPath = path.join(certDir, "key.pem");
+const caCertPath = path.join(certDir, "ca.pem");
+const caKeyPath = path.join(certDir, "ca.key");
+execFileSync("openssl", ["genrsa", "-out", caKeyPath, "2048"], { stdio: "ignore" });
 execFileSync(
   "openssl",
-  ["req", "-x509", "-newkey", "rsa:2048", "-keyout", keyPath, "-out", certPath, "-days", "1", "-nodes", "-subj", "/CN=local.test"],
+  ["req", "-x509", "-new", "-key", caKeyPath, "-out", caCertPath, "-days", "2", "-subj", "/CN=tunless-test-ca"],
   { stdio: "ignore" },
 );
-const cert = fs.readFileSync(certPath);
-const key = fs.readFileSync(keyPath);
+const trustedNames = [
+  "ipinfo.io",
+  "example.com",
+  "chunk.test",
+  "gzip.test",
+  "denied.test",
+  "forbid.test",
+  "auth.test",
+  "quota.test",
+  "nul.test",
+  "local.test",
+];
+function signCert(name, { sans = [name] } = {}) {
+  const keyPath = path.join(certDir, `${name}.key`);
+  const csrPath = path.join(certDir, `${name}.csr`);
+  const certPath = path.join(certDir, `${name}.pem`);
+  const extPath = path.join(certDir, `${name}.ext`);
+  fs.writeFileSync(
+    extPath,
+    `basicConstraints=CA:FALSE\nsubjectAltName=${sans.map((item) => `DNS:${item}`).join(",")}\n`,
+  );
+  execFileSync("openssl", ["genrsa", "-out", keyPath, "2048"], { stdio: "ignore" });
+  execFileSync("openssl", ["req", "-new", "-key", keyPath, "-out", csrPath, "-subj", `/CN=${name}`], { stdio: "ignore" });
+  const args = [
+    "x509", "-req", "-in", csrPath, "-CA", caCertPath, "-CAkey", caKeyPath,
+    "-CAcreateserial", "-out", certPath, "-extfile", extPath,
+  ];
+  args.push("-days", "2");
+  execFileSync("openssl", args, { stdio: "ignore" });
+  return { cert: fs.readFileSync(certPath), key: fs.readFileSync(keyPath) };
+}
+const trusted = signCert("trusted", { sans: trustedNames });
+const mismatch = signCert("mismatch", { sans: ["mismatch.test"] });
+const expired = (() => {
+  const keyPath = path.join(certDir, "expired.key");
+  const csrPath = path.join(certDir, "expired.csr");
+  const certPath = path.join(certDir, "expired.pem");
+  const cnfPath = path.join(certDir, "ca.cnf");
+  fs.writeFileSync(path.join(certDir, "index.txt"), "");
+  fs.writeFileSync(path.join(certDir, "serial"), "01\n");
+  fs.writeFileSync(
+    cnfPath,
+    `[ca]
+default_ca = CA_default
+[CA_default]
+dir = ${certDir}
+certificate = ${caCertPath}
+private_key = ${caKeyPath}
+database = ${path.join(certDir, "index.txt")}
+serial = ${path.join(certDir, "serial")}
+new_certs_dir = ${certDir}
+default_md = sha256
+policy = policy_any
+x509_extensions = v3
+unique_subject = no
+[policy_any]
+commonName = supplied
+[v3]
+basicConstraints = CA:FALSE
+subjectAltName = DNS:expired.test
+`,
+  );
+  execFileSync("openssl", ["genrsa", "-out", keyPath, "2048"], { stdio: "ignore" });
+  execFileSync("openssl", ["req", "-new", "-key", keyPath, "-out", csrPath, "-subj", "/CN=expired.test"], { stdio: "ignore" });
+  execFileSync(
+    "openssl",
+    [
+      "ca", "-config", cnfPath, "-in", csrPath, "-out", certPath,
+      "-startdate", "20200101000000Z", "-enddate", "20200102000000Z",
+      "-batch", "-notext",
+    ],
+    { stdio: "ignore" },
+  );
+  return { cert: fs.readFileSync(certPath), key: fs.readFileSync(keyPath) };
+})();
+const unknown = (() => {
+  const keyPath = path.join(certDir, "unknown.key");
+  const certPath = path.join(certDir, "unknown.pem");
+  execFileSync(
+    "openssl",
+    ["req", "-x509", "-newkey", "rsa:2048", "-keyout", keyPath, "-out", certPath, "-days", "1", "-nodes", "-subj", "/CN=unknown.test", "-addext", "subjectAltName=DNS:unknown.test"],
+    { stdio: "ignore" },
+  );
+  return { cert: fs.readFileSync(certPath), key: fs.readFileSync(keyPath) };
+})();
+const cert = trusted.cert;
+const key = trusted.key;
+const ca = fs.readFileSync(caCertPath);
 
 function track(server) {
   const sockets = new Set();
@@ -380,21 +467,21 @@ test("出口样本认 HTTP 状态和编码，缓存按目标分开，429 不是�
   const upstream = { host: "127.0.0.1", port, protocols: ["http"] };
   try {
     _resetEgressCache();
-    const hk = await detectEgress(upstream, { timeoutMs: 2000, rejectUnauthorized: false });
+    const hk = await detectEgress(upstream, { timeoutMs: 2000, ca });
     assert.equal(hk?.country, "HK");
-    const sg = await detectEgress(upstream, { timeoutMs: 2000, target: "example.com", path: "/json", rejectUnauthorized: false });
+    const sg = await detectEgress(upstream, { timeoutMs: 2000, target: "example.com", path: "/json", ca });
     assert.equal(sg?.country, "SG");
     mode.value = "chunked";
     _resetEgressCache();
-    const chunk = await detectEgress(upstream, { timeoutMs: 2000, target: "chunk.test", path: "/json", rejectUnauthorized: false });
+    const chunk = await detectEgress(upstream, { timeoutMs: 2000, target: "chunk.test", path: "/json", ca });
     assert.equal(chunk?.country, "SG");
     mode.value = "gzip";
     _resetEgressCache();
-    const gz = await detectEgress(upstream, { timeoutMs: 2000, target: "gzip.test", path: "/json", rejectUnauthorized: false });
+    const gz = await detectEgress(upstream, { timeoutMs: 2000, target: "gzip.test", path: "/json", ca });
     assert.equal(gz?.country, "DE");
     mode.value = "denied";
     _resetEgressCache();
-    const denied = await detectEgress(upstream, { timeoutMs: 2000, target: "denied.test", path: "/json", rejectUnauthorized: false });
+    const denied = await detectEgress(upstream, { timeoutMs: 2000, target: "denied.test", path: "/json", ca });
     assert.equal(denied, null);
   } finally {
     await shutdown(proxy);
@@ -411,21 +498,98 @@ test("401/403/429 保留状态且服务未验证，假 HTTP/2 字节不算成功
   }));
   const port = await listen(proxy);
   try {
-    const forbidden = await checkReachability({ port, target: "forbid.test", timeoutMs: 2000 });
+    const forbidden = await checkReachability({ port, target: "forbid.test", timeoutMs: 2000, ca });
     assert.equal(forbidden.httpStatus, 403);
+    assert.equal(forbidden.tlsOk, true);
     assert.equal(forbidden.serviceVerified, false);
     assert.equal(forbidden.tunnelOk, true);
-    const auth = await checkReachability({ port, target: "auth.test", timeoutMs: 2000 });
+    const auth = await checkReachability({ port, target: "auth.test", timeoutMs: 2000, ca });
     assert.equal(auth.httpStatus, 401);
     assert.equal(auth.serviceVerified, false);
-    const quota = await checkReachability({ port, target: "quota.test", timeoutMs: 2000 });
+    const quota = await checkReachability({ port, target: "quota.test", timeoutMs: 2000, ca });
     assert.equal(quota.httpStatus, 429);
     assert.equal(quota.serviceVerified, false);
-    const nul = await checkReachability({ port, target: "nul.test", timeoutMs: 600 });
+    const nul = await checkReachability({ port, target: "nul.test", timeoutMs: 600, ca });
     assert.equal(nul.ok, false);
     assert.equal(nul.serviceVerified, false);
   } finally {
     await shutdown(proxy);
+  }
+});
+
+test("自签、主机名不符、过期证书不能当成 TLS 通过", async () => {
+  const { checkReachability } = await import("../src/core/reach.js");
+  const cases = [
+    ["unknown.test", unknown.cert, unknown.key, "未知 CA"],
+    ["other.test", mismatch.cert, mismatch.key, "主机名不符"],
+    ["expired.test", expired.cert, expired.key, "过期"],
+  ];
+  for (const [target, serverCert, serverKey] of cases) {
+    const proxy = track(tlsProxy(() => textResponse(200, { ok: true }), serverCert, serverKey));
+    const port = await listen(proxy);
+    try {
+      const result = await checkReachability({ port, target, timeoutMs: 2000, ca });
+      assert.equal(result.ok, false, target);
+      assert.equal(result.tlsOk, false, target);
+      assert.equal(result.serviceVerified, false, target);
+      assert.match(result.detail, /证书不可信/);
+    } finally {
+      await shutdown(proxy);
+    }
+  }
+});
+
+test("普通 HTTP 上游沉默会在握手时限内返回 504，提前断开返回 502，且不追加第二条状态", async () => {
+  const { HttpProxyServer } = await import("../src/core/relay.js");
+  const silent = track(net.createServer((socket) => {
+    socket.on("data", () => {});
+    socket.on("error", () => {});
+  }));
+  const closing = track(net.createServer((socket) => {
+    socket.on("data", () => socket.destroy());
+    socket.on("error", () => {});
+  }));
+  const silentPort = await listen(silent);
+  const closingPort = await listen(closing);
+  const relay = new HttpProxyServer({
+    port: 0,
+    upstream: { host: "127.0.0.1", port: silentPort, protocols: ["http"] },
+    handshakeTimeout: 250,
+    log: () => {},
+  });
+  await relay.start();
+  try {
+    const started = Date.now();
+    const hung = await connectOnce(
+      relay.server.address().port,
+      "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n",
+      1500,
+    );
+    assert.match(hung, /^HTTP\/1\.1 504/);
+    assert.equal(hung.split("HTTP/1.1").length - 1, 1);
+    assert.ok(Date.now() - started < 1000, `沉默响应花了 ${Date.now() - started}ms`);
+  } finally {
+    await relay.stop();
+    await shutdown(silent);
+  }
+  const relay2 = new HttpProxyServer({
+    port: 0,
+    upstream: { host: "127.0.0.1", port: closingPort, protocols: ["http"] },
+    handshakeTimeout: 250,
+    log: () => {},
+  });
+  await relay2.start();
+  try {
+    const closed = await connectOnce(
+      relay2.server.address().port,
+      "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n",
+      1500,
+    );
+    assert.match(closed, /^HTTP\/1\.1 502/);
+    assert.equal(closed.split("HTTP/1.1").length - 1, 1);
+  } finally {
+    await relay2.stop();
+    await shutdown(closing);
   }
 });
 
@@ -519,7 +683,7 @@ function gzipResponse(status, json) {
   return { raw: Buffer.concat([head, gz]) };
 }
 
-function tlsProxy(handler) {
+function tlsProxy(handler, serverCert = cert, serverKey = key) {
   return net.createServer((socket) => {
     let buf = Buffer.alloc(0);
     const onData = (chunk) => {
@@ -532,7 +696,7 @@ function tlsProxy(handler) {
       const target = /^CONNECT (\S+)/.exec(head)?.[1] ?? "";
       socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
       if (rest.length) socket.unshift(rest);
-      const secure = new tls.TLSSocket(socket, { isServer: true, cert, key });
+      const secure = new tls.TLSSocket(socket, { isServer: true, cert: serverCert, key: serverKey });
       secure.on("error", () => {});
       let req = Buffer.alloc(0);
       secure.on("data", (c) => {

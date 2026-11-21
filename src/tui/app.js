@@ -7,8 +7,9 @@
 // 主题：启动时用 OSC 11 询问终端背景色，按亮暗切换配色；
 // 终端不支持 Unicode 时符号与边框降级成 ASCII。
 
+import "../color-env.js";
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { render, Box, Text, useApp, useInput, useStdout } from "ink";
+import { render, Box, Text, useApp, useInput, useStdout, useWindowSize } from "ink";
 import { h, ThemeProvider, useTheme } from "./ui.js";
 import { getTheme, detectUnicode } from "./theme.js";
 import { queryTerminalColorScheme, themeFromEnv } from "./terminal-theme.js";
@@ -51,12 +52,13 @@ import {
   savePinnedUpstream,
   systemProxyPortsFromState,
 } from "../core/upstream.js";
-import { rowsFor, verdictFor } from "../core/status-rows.js";
+import { overviewLines, rowsFor, verdictFor } from "../core/status-rows.js";
 import { createReporter } from "../cli/report.js";
 
 export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const { exit } = useApp();
   const { stdout } = useStdout();
+  const windowSize = useWindowSize();
   const theme = useTheme();
 
   const [state, setState] = useState(emptyState);
@@ -146,19 +148,18 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     }
   }, [appId, state.sidecar?.httpPort]);
 
-  const refreshGen = useRef(0);
-  const refreshing = useRef(false);
+  const refreshAbort = useRef(null);
   const refresh = useCallback(async () => {
-    if (refreshing.current) {
-      refreshGen.current += 1;
-      refreshing.current = false;
+    if (refreshAbort.current) {
+      refreshAbort.current.abort();
+      setState((prev) => ({ ...prev, loading: false }));
       setBusy(false);
       setProgress("");
-      setHint("检测已取消。按 r 再测一次");
+      setHint("检测已取消。等这一轮网络探测停下后再按 r");
       return null;
     }
-    const gen = (refreshGen.current += 1);
-    refreshing.current = true;
+    const ac = new AbortController();
+    refreshAbort.current = ac;
     setBusy(true);
     setProgress("正在采集…");
     try {
@@ -166,29 +167,34 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         internalDns,
         repoRoots,
         includeChrome,
+        signal: ac.signal,
         onProgress: (stage, partial) => {
-          if (gen !== refreshGen.current) return;
+          if (ac.signal.aborted) return;
           setProgress(stage);
-          setState((prev) => ({ ...prev, ...partial }));
+          setState((prev) => ({ ...prev, ...partial, loading: true }));
         },
       });
-      if (gen !== refreshGen.current) return null;
+      if (ac.signal.aborted) {
+        setState((prev) => ({ ...prev, loading: false }));
+        return null;
+      }
       setState(next);
       await refreshLive();
       log(`状态已更新（内网域名 ${next.internalDomains.length} 个）`, "ok");
       return next;
     } catch (err) {
-      if (gen === refreshGen.current) {
-        log(`刷新失败：${err.message}。按 r 重试`, "bad");
-        setHint(`刷新失败：${err.message}。按 r 重试`);
+      setState((prev) => ({ ...prev, loading: false }));
+      if (ac.signal.aborted || err.name === "AbortError") {
+        setHint("检测已取消");
+        return null;
       }
+      log(`刷新失败：${err.message}。按 r 重试`, "bad");
+      setHint(`刷新失败：${err.message}。按 r 重试`);
       return null;
     } finally {
-      if (gen === refreshGen.current) {
-        refreshing.current = false;
-        setBusy(false);
-        setProgress("");
-      }
+      if (refreshAbort.current === ac) refreshAbort.current = null;
+      setBusy(false);
+      setProgress("");
     }
   }, [internalDns, repoRoots, includeChrome, log, refreshLive]);
 
@@ -776,6 +782,13 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       return;
     }
 
+    // 原始模式里 Ctrl+D 只是字符 \x04，不是操作系统的 EOF。
+    // 把它当成退出，避免用户按了没反应。
+    if (key.ctrl && input === "d") {
+      exit();
+      return;
+    }
+
     if (input === "q") {
       exit();
       return;
@@ -865,17 +878,19 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         return;
       }
       if (key.return) {
-        // 动作在跑时回车不能再起一个 —— launchApp 是真副作用（quit + open）。
-        if (executing || busy) return;
         const app = apps[Math.min(appIndex, Math.max(0, apps.length - 1))];
-        if (!app) return;
+        if (!app) {
+          setHint("没有已安装的工具，回车不会改配置。按 q 退出");
+          return;
+        }
+        // 动作在跑时回车不能再起一个 —— launchApp 是真副作用（quit + open）。
+        if (executing || busy) {
+          setHint("检测还在跑。再按 r 取消");
+          return;
+        }
 
         if (!state.sidecar?.running) {
           setHint("转发服务没在听。按空格启动后再回车测隧道。这一步不改配置");
-          return;
-        }
-        if (executing || busy) {
-          setHint("检测还在跑。再按 r 取消");
           return;
         }
         setHint("");
@@ -913,7 +928,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       if (key.upArrow || input === "k") {
         // 滚到「最早一窗」就停：再往上窗口越削越薄，没有更早的可看。
         // limit 与 ServiceScreen 内同一个公式（rows - 14）。
-        const limit = Math.max(5, (stdout.rows ?? 24) - 14);
+        const limit = Math.max(5, (windowSize.rows || 24) - 14);
         setEventScroll((n) => Math.min(Math.max(0, events.length - limit), n + 1));
         return;
       }
@@ -1219,12 +1234,13 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     }
   });
 
-  const width = stdout.columns || 80;
-  const rows = stdout.rows || 24;
+  const width = windowSize.columns || stdout.columns || 80;
+  const rows = windowSize.rows || stdout.rows || 24;
+  const cramped = width < 60 || rows < 18;
 
   let body;
   if (helpOpen) {
-    body = h(HelpPanel, { width });
+    body = h(HelpPanel, { width, rows });
   } else if (screen === "dashboard") {
     body = h(Workbench, { state, appIndex, hint, executing, width });
   } else if (screen === "upstream") {
@@ -1319,9 +1335,32 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
             ? h(KeyBar, { keys: DOMAINS_KEYS })
             : help;
 
+  if (cramped && !editing && !editingTarget && !editingUpstream) {
+    const brief = overviewLines(state).slice(0, Math.max(1, rows - 4));
+    return h(
+      Box,
+      { flexDirection: "column", height: rows, overflow: "hidden" },
+      brief.map((row) =>
+        h(
+          Text,
+          { key: row.id },
+          `${row.label} ${row.detail}`.slice(0, Math.max(8, width)),
+        ),
+      ),
+      h(
+        Text,
+        null,
+        `窗口 ${width}x${rows} 太小。至少 60 列、18 行。q 退出`.slice(0, Math.max(8, width)),
+      ),
+      hint
+        ? h(Text, null, hint.slice(0, Math.max(8, width)))
+        : h(Text, null, "q 退出"),
+    );
+  }
+
   return h(
     Box,
-    { flexDirection: "column", height: rows },
+    { flexDirection: "column", height: rows, overflow: "hidden" },
     screen === "dashboard"
       ? null
       : h(

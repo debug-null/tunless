@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import "../src/color-env.js";
 import { main } from "../src/cli.js";
 
 main(process.argv.slice(2))

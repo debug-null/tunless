@@ -24,6 +24,7 @@ export function checkReachability({
   targetPort = 443,
   targetPath = "/",
   timeoutMs = 8000,
+  ca = undefined,
 } = {}) {
   return new Promise((resolve) => {
     const started = Date.now();
@@ -98,7 +99,8 @@ export function checkReachability({
           {
             socket,
             servername: target,
-            rejectUnauthorized: false,
+            ca,
+            // 默认校验证书。自签、主机名不符、过期都是失败，不能写成 TLS 已通过。
             // 必须显式只谈 http/1.1。
             // 有些站点（agentn.global.api5.cursor.sh 就是）默认协商成 h2，
             // 然后在隧道里回二进制帧。我们按 HTTP/1.1 解析文本，
@@ -116,11 +118,17 @@ export function checkReachability({
           tunnelOk: true,
           tlsOk: false,
         }));
-        secure.on("error", (err) => finish(false, `隧道建立后失败：${err.message}`, null, {
-          layer: "tls",
-          tunnelOk: true,
-          tlsOk: false,
-        }));
+        secure.on("error", (err) => {
+          const untrusted = /CERT_|ALTNAME|SELF_SIGNED|EXPIRED|UNABLE_TO_VERIFY|HOSTNAME/i.test(
+            `${err.code || ""} ${err.message}`,
+          );
+          finish(false, untrusted ? `证书不可信：${err.code || err.message}` : `隧道建立后失败：${err.message}`, null, {
+            layer: "tls",
+            tunnelOk: true,
+            tlsOk: false,
+            certTrusted: false,
+          });
+        });
 
         let resp = "";
         secure.on("data", (chunk) => {

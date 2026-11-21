@@ -3,12 +3,13 @@ import http from "node:http";
 const DEFAULT_TIMEOUT = 8000;
 
 export class MihomoApi {
-  constructor({ host = "127.0.0.1", port = 9090, secret = "", socketPath = null, timeout = DEFAULT_TIMEOUT } = {}) {
+  constructor({ host = "127.0.0.1", port = 9090, secret = "", socketPath = null, timeout = DEFAULT_TIMEOUT, signal = null } = {}) {
     this.host = host;
     this.port = port;
     this.secret = secret;
     this.socketPath = socketPath;
     this.timeout = timeout;
+    this.signal = signal;
   }
 
   get descriptor() {
@@ -35,6 +36,12 @@ export class MihomoApi {
     const payload = body === null ? null : JSON.stringify(body);
 
     return new Promise((resolve, reject) => {
+      if (this.signal?.aborted) {
+        const err = new Error("检测已取消");
+        err.name = "AbortError";
+        reject(err);
+        return;
+      }
       const req = http.request(options, (res) => {
         const chunks = [];
         res.on("data", (chunk) => chunks.push(chunk));
@@ -52,7 +59,16 @@ export class MihomoApi {
       req.on("timeout", () => {
         req.destroy(new Error(`请求超时（${this.timeout}ms）：${method} ${path}`));
       });
-      req.on("error", reject);
+      const abort = () => {
+        const err = new Error("检测已取消");
+        err.name = "AbortError";
+        req.destroy(err);
+      };
+      if (this.signal) this.signal.addEventListener("abort", abort, { once: true });
+      req.on("error", (err) => {
+        if (this.signal) this.signal.removeEventListener("abort", abort);
+        reject(err.name === "AbortError" || this.signal?.aborted ? Object.assign(err, { name: "AbortError" }) : err);
+      });
       if (payload !== null) req.write(payload);
       req.end();
     });
@@ -102,19 +118,47 @@ export class MihomoApi {
  * 之前是串行：wmsxwd 之外再挂几个无效候选，每个都要等满 8s 超时，
  * 界面上就是「找内核」这一步卡二三十秒。
  */
-export async function probeApi(candidates) {
+export async function probeApi(candidates, { signal = null } = {}) {
+  if (signal?.aborted) {
+    const err = new Error("检测已取消");
+    err.name = "AbortError";
+    throw err;
+  }
   if (!candidates?.length) {
     throw new Error("找不到可达的 mihomo 接口：没有候选地址");
   }
   const failures = [];
   return await new Promise((resolve, reject) => {
     let remaining = candidates.length;
+    let settled = false;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      fn(value);
+    };
+    if (signal) {
+      signal.addEventListener(
+        "abort",
+        () => {
+          const err = new Error("检测已取消");
+          err.name = "AbortError";
+          finish(reject, err);
+        },
+        { once: true },
+      );
+    }
     for (const candidate of candidates) {
-      const api = new MihomoApi(candidate);
+      const api = new MihomoApi({ ...candidate, signal });
       api
         .version()
-        .then((info) => resolve({ api, info, candidate }))
+        .then((info) => finish(resolve, { api, info, candidate }))
         .catch((err) => {
+          if (err.name === "AbortError" || signal?.aborted) {
+            const abortErr = new Error("检测已取消");
+            abortErr.name = "AbortError";
+            finish(reject, abortErr);
+            return;
+          }
           failures.push({ candidate, error: err.message });
           remaining -= 1;
           if (remaining === 0) {
@@ -123,7 +167,7 @@ export async function probeApi(candidates) {
               .join("\n");
             const error = new Error(`找不到可达的 mihomo 接口：\n${detail}`);
             error.failures = failures;
-            reject(error);
+            finish(reject, error);
           }
         });
     }

@@ -49,9 +49,24 @@ function stepRow(step) {
   return kv(label, [txt(step.text)], 8);
 }
 
-export function HelpPanel({ width }) {
+export function HelpPanel({ width, rows }) {
   const theme = useTheme();
   const cardWidth = Math.min(width, 78);
+  if (rows != null && rows < 30) {
+    const lines = [
+      "这是什么：Antigravity / Cursor 只认 HTTPS_PROXY 时，用本地代理出网，不必开 TUN。",
+      "怎么用：空格启动转发服务，回车只测隧道，c 配置，写入要再按 y。",
+      `代理填什么：${PROXY_INFO.http}  ${PROXY_INFO.socks}`,
+      "什么时候才需要 TUN：只有完全无法走代理的工具。开了 TUN 内网域名会被劫持。",
+      "Esc 返回 · q 退出",
+    ];
+    return h(
+      Box,
+      { flexDirection: "column", height: Math.max(5, rows - 4), overflow: "hidden" },
+      h(Text, { bold: true, color: theme.colors.accent }, "帮助"),
+      ...lines.map((line) => h(Text, { key: line }, line)),
+    );
+  }
 
   const whatRows = [
     kv("解决的问题", [txt("Agent 不开 TUN 就联不上网")], 12),

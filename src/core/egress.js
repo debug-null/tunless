@@ -52,14 +52,14 @@ export async function detectEgress(upstream, {
   timeoutMs = 6000,
   target = GEO_HOST,
   path = "/json",
-  rejectUnauthorized = true,
+  ca,
 } = {}) {
   if (!upstream?.host || !upstream?.port) return null;
   const key = egressCacheKey(upstream, target, path);
   const hit = cache.get(key);
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.egress;
 
-  const egress = await queryGeo(upstream, timeoutMs, target, path, rejectUnauthorized).catch(() => null);
+  const egress = await queryGeo(upstream, timeoutMs, target, path, ca).catch(() => null);
   // 失败和被拒绝的响应不缓存成「有国家」，避免 429 正文把错误出口钉住。
   if (egress?.country) cache.set(key, { at: Date.now(), egress });
   return egress;
@@ -131,7 +131,7 @@ function decodeChunked(body) {
   return null;
 }
 
-async function queryGeo(upstream, timeoutMs, target, requestPath, rejectUnauthorized) {
+async function queryGeo(upstream, timeoutMs, target, requestPath, ca) {
   const socket = await openUpstreamTunnel(upstream, target, 443, timeoutMs);
   try {
     return await new Promise((resolve, reject) => {
@@ -148,7 +148,8 @@ async function queryGeo(upstream, timeoutMs, target, requestPath, rejectUnauthor
           socket,
           servername: target,
           ALPNProtocols: ["http/1.1"],
-          rejectUnauthorized,
+          ca,
+          rejectUnauthorized: true,
         },
         () => {
           conn.write(
