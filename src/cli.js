@@ -1,3 +1,4 @@
+import "./color-env.js";
 import fs from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -17,6 +18,9 @@ import {
   discoverUpstream,
   verifyUpstream,
   describeCandidate,
+  probeProxy,
+  upstreamFromProbe,
+  systemProxyPortsFromState,
   detectClient,
   detectActiveClient,
   detectControllerPorts,
@@ -26,7 +30,7 @@ import {
   parseUpstream,
   detectPinnedDrift,
 } from "./core/upstream.js";
-import { detectEgress } from "./core/egress.js";
+import { detectEgress, describeEgress } from "./core/egress.js";
 import { classifyDomain, probeServer, resolve4System } from "./core/dns.js";
 import { dataDir, writeRuntime, clearRuntime, packageVersion } from "./core/paths.js";
 import { createReporter } from "./cli/report.js";
@@ -39,7 +43,7 @@ import {
   renderDiff,
 } from "./core/plan.js";
 import { dumpYaml } from "./core/yaml.js";
-import { HttpProxyServer, Socks5Server } from "./core/relay.js";
+import { HttpProxyServer, Socks5Server, normalizeInternalFallback } from "./core/relay.js";
 import { checkTargets } from "./core/reach.js";
 import {
   resolveTargets,
@@ -272,18 +276,29 @@ async function connect(frontend) {
 export async function resolveUpstream(args = {}) {
   const explicit = parseUpstream(args.flags?.upstream);
   if (explicit) {
-    return {
-      upstream: { ...explicit, protocols: ["http", "socks5"] },
+    const probed = await probeProxy(explicit.host, explicit.port);
+    return upstreamFromProbe({
+      host: explicit.host,
+      port: explicit.port,
+      probed,
       source: "flag",
       detail: `命令行指定 ${explicit.host}:${explicit.port}`,
-    };
+    });
   }
 
   const pinned = loadPinnedUpstream();
   if (pinned) {
-    const protocols = await import("./core/upstream.js").then((m) =>
-      m.probeProtocols(pinned.host, pinned.port),
-    );
+    const probed = await probeProxy(pinned.host, pinned.port);
+    if (!probed.protocols.length && probed.authRequired.length) {
+      return upstreamFromProbe({
+        host: pinned.host,
+        port: pinned.port,
+        probed,
+        source: "pinned",
+        detail: `手动指定 ${pinned.host}:${pinned.port}`,
+      });
+    }
+    const protocols = probed.protocols;
     if (protocols.length) {
       // 端口还活着，但可能已经属于旧客户端了。用户换了客户端、系统代理
       // 指向了新的端口，这时继续用钉住的值 = 流量被悄悄送回旧客户端。
@@ -331,11 +346,16 @@ async function resolveUpstreamAuto(args = {}) {
     const cfg = await conn.api.configs();
     mixedPort = cfg["mixed-port"] ? Number(cfg["mixed-port"]) : null;
     if (mixedPort) {
-      return {
-        upstream: { host: "127.0.0.1", port: mixedPort, protocols: ["http", "socks5"] },
-        source: "core-api",
-        detail: `${frontend.label} 的混合端口 ${mixedPort}`,
-      };
+      const probed = await probeProxy("127.0.0.1", mixedPort);
+      if (probed.protocols.length) {
+        return upstreamFromProbe({
+          host: "127.0.0.1",
+          port: mixedPort,
+          probed,
+          source: "core-api",
+          detail: `${frontend.label} 的混合端口 ${mixedPort}`,
+        });
+      }
     }
   } catch {
     // 没有内核 API 很正常，继续走通用探测
@@ -541,11 +561,8 @@ export async function cmdDoctor(args) {
     // Gemini/Claude/GPT。单列一行，别混进连通性里。
     if (check.ok) {
       const eg = await detectEgress(resolved.upstream);
-      if (eg?.restricted) {
-        rep.row("warn", "出口地区", `${eg.country ?? "?"} · Gemini/Claude/GPT 在该区不可用，切个美/日/新节点`);
-      } else if (eg?.country) {
-        rep.row("ok", "出口地区", `${eg.country}${eg.region ? `（${eg.region}）` : ""} · AI 模型目录完整`);
-      }
+      const note = describeEgress(eg);
+      if (note) rep.row(note.restricted ? "warn" : "ok", "出口样本", note.text);
     }
   } else {
     exitCode = 1;
@@ -722,8 +739,9 @@ export async function cmdProxy(args) {
   let upstream = {
     host: resolved.upstream.host,
     port: resolved.upstream.port,
-    protocols: resolved.upstream.protocols ?? ["http", "socks5"],
+    protocols: resolved.upstream.protocols ?? [],
   };
+  const internalFallback = normalizeInternalFallback(args.flags["internal-fallback"]);
 
   const repoRoots = args.flags.repos
     ? String(args.flags.repos).split(",").map((s) => s.trim()).filter(Boolean)
@@ -810,6 +828,7 @@ export async function cmdProxy(args) {
     upstream,
     internalDns,
     internalSuffixes: suffixes,
+    internalFallback,
     rules,
     log,
   });
@@ -822,6 +841,7 @@ export async function cmdProxy(args) {
       upstream,
       internalDns,
       internalSuffixes: suffixes,
+      internalFallback,
       rules,
       log,
     });
@@ -838,6 +858,7 @@ export async function cmdProxy(args) {
     upstream,
     suffixes,
     internalDns,
+    internalFallback,
   });
 
   // 上游热更新。转发服务是常驻的，用户随时可能换客户端
@@ -861,12 +882,12 @@ export async function cmdProxy(args) {
           upstream = {
             host: again.upstream.host,
             port: again.upstream.port,
-            protocols: again.upstream.protocols ?? ["http", "socks5"],
+            protocols: again.upstream.protocols ?? [],
           };
           httpServer.upstream = upstream;
           if (socksServer) socksServer.upstream = upstream;
           log(`上游已切换到 ${upstream.host}:${upstream.port}（${again.detail}）`);
-          writeRuntime({ httpPort, socksPort, upstream, suffixes, internalDns });
+          writeRuntime({ httpPort, socksPort, upstream, suffixes, internalDns, internalFallback });
         } catch {
           // 探测失败就保持现状，别把正在用的连接弄断
         }
@@ -1331,17 +1352,22 @@ export async function cmdUpstream(args) {
       say(`  ${bad("用法：tunless upstream set 127.0.0.1:7897")}`);
       return 1;
     }
-    const protocols = await probeProtocolsSafe(parsed.host, parsed.port);
-    if (!protocols.length) {
-      say(`  ${warn(`${parsed.host}:${parsed.port} 上没有认出代理协议`)}`);
+    const probed = await probeProxy(parsed.host, parsed.port);
+    const protocols = probed.protocols;
+    if (probed.authRequired.length && !protocols.length) {
+      say(`  ${warn(`${parsed.host}:${parsed.port} 需要认证（${probed.authRequired.join("+")}）`)}`);
+      say(dim("    当前不代填凭据，不会把它当成可用上游"));
+    } else if (!protocols.length) {
+      say(`  ${warn(`${parsed.host}:${parsed.port} 上没有认出免认证的 HTTP/SOCKS`)}`);
       say(dim("    仍然会保存。如果是 TUN 下才开放的端口，开着 TUN 再试一次"));
     }
-    // 记下「此刻系统代理指向哪个端口」：以后系统代理变了，就知道
-    // 用户是换了客户端，还是自己又换回了这个端口。
+    // 记下「此刻系统代理指向哪些端口」：同一客户端的 HTTP 和 SOCKS 不算换客户端。
     const sys = await systemProxyState();
+    const systemProxyPorts = systemProxyPortsFromState(sys);
     const file = savePinnedUpstream({
       ...parsed,
-      systemProxyPort: sys?.httpEnabled && sys.port ? Number(sys.port) : null,
+      systemProxyPorts,
+      systemProxyPort: systemProxyPorts[0] ?? null,
     });
     say(`\n  ${ok(`已指定上游代理 ${parsed.host}:${parsed.port}`)}`);
     if (protocols.length) say(dim(`    识别为 ${protocols.join(" + ")}`));
@@ -1476,15 +1502,17 @@ export async function cmdTest(args) {
       : "";
     const timing = dim(`  ${r.ms}ms`);
     say(`  ${mark} ${where.padEnd(38)}${label}${timing}`);
-    if (!r.ok) say(dim(`      ${r.detail}`));
+    if (r.detail && (!r.ok || r.serviceVerified === false)) say(dim(`      ${r.detail}`));
   }
 
   say();
-  if (checked.ok) {
-    say(`  ${ok("这些目标都能经代理访问")}`);
-    say(dim("    4xx 也算通 —— 说明请求到了对端，只是这个 URL 不接受 GET"));
+  if (checked.serviceVerified) {
+    say(`  ${ok("带账号的服务调用已通过")}`);
+  } else if (checked.ok) {
+    say(`  ${warn("隧道到达对端，服务未验证")}`);
+    say(dim("    HTTP 状态只说明请求到了对端。401/403/429 不能当成模型或账号可用"));
     if (checked.failedOptional.length) {
-      say(dim(`    ${checked.failedOptional.length} 个可选目标没通，不影响结论`));
+      say(dim(`    ${checked.failedOptional.length} 个可选目标没通，不影响隧道结论`));
     }
   } else {
     say(`  ${bad(`${checked.failedRequired.length} 个必需目标不通`)}`);
@@ -1953,7 +1981,11 @@ ${head("选项")}
   --repos <路径>        逗号分隔的仓库根目录，用于扫描域名
   --no-chrome           跳过 Chrome 历史记录（需要完全磁盘访问权限）
   --frontend <id>       指定前端：clash-verge-rev | generic-mihomo
-  --upstream <host:port> 手动指定上游代理（临时覆盖，不落盘）
+  --upstream <host:port> 手动指定上游代理（临时覆盖，不落盘；按实际 HTTP/SOCKS 能力使用）
+  --internal-fallback refuse|upstream
+                    内网后缀解析失败、假 IP 或公网地址时的策略。
+                    refuse（默认）返回 502，不把该域名发给上游。
+                    upstream 显式改走上游，域名会泄露给代理。
   --config <路径>       指定配置文件（通用前端）
   --port <n>            HTTP 代理端口（默认 8899）
   --socks-port <n>      SOCKS5 代理端口（默认 8898，设为 0 则禁用）

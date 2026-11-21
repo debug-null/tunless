@@ -66,6 +66,21 @@ test("帮助面板讲清楚是什么、给谁用、代理填什么", () => {
   assert.match(text, /TUN/);
 });
 
+test("80x24 的帮助留在窗口里，并看得到退出", () => {
+  const text = renderToString(
+    h(Box, { flexDirection: "column", width: 80, height: 24 }, h(HelpPanel, { width: 80, rows: 24 })),
+  );
+  const lines = text.split("\n").filter((line) => line.trim());
+  assert.ok(lines.length <= 18, `帮助占了 ${lines.length} 行`);
+  assert.match(text, /这是什么/);
+  assert.match(text, /怎么用/);
+  assert.match(text, /代理填什么/);
+  assert.match(text, /127\.0\.0\.1/);
+  assert.match(text, /8899/);
+  assert.match(text, /TUN/);
+  assert.match(text, /q 退出/);
+});
+
 test("帮助面板每一行都在边框内", () => {
   const text = renderToString(
     h(Box, { flexDirection: "column", width: 120 }, h(HelpPanel, { width: 120 })),

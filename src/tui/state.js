@@ -103,11 +103,19 @@ export async function collectState({
   repoRoots = [],
   includeChrome = false,
   onProgress = null,
+  signal = null,
 } = {}) {
+  const cancelled = () => {
+    if (!signal?.aborted) return;
+    const err = new Error("检测已取消");
+    err.name = "AbortError";
+    throw err;
+  };
   const state = emptyState();
   state.loading = true;
   state.rules = loadRules();
   const notify = (stage) => {
+    if (signal?.aborted) return;
     if (onProgress) {
       try {
         onProgress(stage, state);
@@ -118,7 +126,9 @@ export async function collectState({
   };
 
   // 内网 DNS：显式参数 > 系统自动发现 > 兜底。换网络环境不用重配。
+  cancelled();
   const internalDns = await resolveInternalDns(internalDnsFlag, DEFAULT_INTERNAL_DNS);
+  cancelled();
   state.internalDns = internalDns;
 
   const frontends = discoverAll();
@@ -166,11 +176,12 @@ export async function collectState({
   const dnsAlive = await probeServer(internalDns);
   state.dnsAlive = dnsAlive.ok;
 
+  cancelled();
   const [coreResult, appsResult, portsResult, scanResult, procsResult] = await Promise.all([
     // 内核连通性
     (async () => {
       try {
-        const conn = await probeApi(frontend.apiCandidates);
+        const conn = await probeApi(frontend.apiCandidates, { signal });
         const cfg = await conn.api.configs();
         return {
           reachable: true,
@@ -182,6 +193,7 @@ export async function collectState({
           failures: [],
         };
       } catch (err) {
+        if (err.name === "AbortError" || signal?.aborted) throw err;
         return { reachable: false, error: err.message, failures: err.failures ?? [] };
       }
     })(),
@@ -300,6 +312,7 @@ export async function collectState({
   state.notes = scanResult.notes;
   state.processes = procsResult;
 
+  cancelled();
   // 第三段：上游探测（需要 mixedPort）+ fake-ip 检查（需要后缀）。
   notify("正在探测上游代理…");
   state.upstream.pinned = loadPinnedUpstream();
@@ -342,7 +355,7 @@ export async function collectState({
             chosen: {
               host: pinned.host,
               port: pinned.port,
-              protocols: match?.protocols ?? ["http", "socks5"],
+              protocols: match?.protocols ?? [],
             },
             detail: match ? `${describeCandidate(match)}（已固定）` : `手动固定 ${pinned.host}:${pinned.port}`,
           };
@@ -400,6 +413,7 @@ export async function collectState({
     state.sidecar.pendingSuffixes = state.suffixes;
   }
 
+  cancelled();
   state.loading = false;
   state.updatedAt = new Date();
   notify("完成");

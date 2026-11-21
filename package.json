@@ -15,6 +15,7 @@
   "files": [
     "bin",
     "src",
+    "scripts",
     "docs",
     "README.md",
     "LICENSE"

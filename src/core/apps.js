@@ -312,7 +312,9 @@ const KNOWN_PROXY_PORTS = new Set([7897, 7890, 7891, 8899, 8898, 1080, 1087, 108
  * 只有 mihomo / clash / tunless(node) 这类才可能是代理；
  * Antigravity 连的 MCP 服务端口（比如 magpie 的 3425）不是。
  */
-const PROXY_LISTENER = /^(node|mihomo|clash|clash-verge|verge-mihomo|sing-box|v2ray|xray|hysteria|tuic|gost|privoxy|squid)$/i;
+// 不把裸的 node 算成代理：本机开发服务器也是 node，会把 3000 误报成代理。
+// tunless 自己的 8899/8898 在已知端口里，不依赖进程名。
+const PROXY_LISTENER = /^(mihomo|clash|clash-verge|verge-mihomo|clashx|sing-box|v2ray|xray|hysteria|tuic|gost|privoxy|squid|surge|stash|atlascore|wmsxwd)$/i;
 
 /**
  * 从 `lsof -nP -iTCP` 的输出里挑出「连到本地代理」的端口号。
@@ -359,8 +361,8 @@ export function parseProxyConnections(lsofOutput, pids) {
   const ports = new Set();
   const byPid = new Map();
   for (const cols of rows) {
-    // 形如 127.0.0.1:54328->127.0.0.1:8899
-    const m = /->127\.0\.0\.1:(\d+)/.exec(cols[8] ?? "");
+    // 127.0.0.1:54328->127.0.0.1:8899，或 [::1]:1->[::1]:8899
+    const m = /->(?:127\.0\.0\.1|\[::1\]):(\d+)/.exec(cols[8] ?? "");
     if (!m) continue;
     const port = Number(m[1]);
     if (ownPorts.has(port)) continue;
@@ -432,7 +434,7 @@ export async function processProxyPort(pid) {
     const ports = new Set();
     for (const line of stdout.split("\n")) {
       // 取「连接目标」那一侧：127.0.0.1:源端口->127.0.0.1:代理端口
-      const m = /->127\.0\.0\.1:(\d+)/.exec(line);
+      const m = /->(?:127\.0\.0\.1|\[::1\]):(\d+)/.exec(line);
       if (m) ports.add(Number(m[1]));
     }
     // 只保留已知代理端口 —— 之前任何回环目标都算数，

@@ -289,7 +289,8 @@ test("向导第 4 步显示实测结果", async () => {
   // 测的是这个工具自己会连的域名，而不是固定的 github
   assert.match(text, /oauth2\.googleapis\.com/);
   assert.match(text, /cloudcode-pa\.googleapis\.com/);
-  assert.match(text, /都能经代理访问/);
+  assert.match(text, /服务未验证/);
+  assert.doesNotMatch(text, /都能经代理访问/);
 });
 
 test("向导第 2 步让用户先选上游代理，可手动填写", async () => {

@@ -1,7 +1,8 @@
 // 界面配色与符号。
 //
 // 这里不再自己拼 ANSI 转义序列：ink 的 <Text> 通过 color / dimColor 等属性
-// 控制样式，由 ink 统一处理是否启用颜色（NO_COLOR、非 TTY 等）。
+// 交给 chalk。chalk 这份 supports-color 不认 NO_COLOR，所以入口要先走 color-env.js，
+// 在 chalk 加载前把 FORCE_COLOR 设为 0。
 //
 // 两点参照 lore 的 termcn：
 //   1. 亮色终端用亮色主题（白字在白底上看不见）；

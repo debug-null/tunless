@@ -46,6 +46,20 @@ test("parseUpstream 接受 host:port 与裸端口", () => {
   assert.equal(parseUpstream("127.0.0.1:0"), null);
 });
 
+test("未知进程只显示文件名，不带参数", async () => {
+  const { displayProcess, describeCandidate } = await import("../src/core/upstream.js");
+  const command = "/usr/bin/node server.js --token super-secret-value --port 9";
+  assert.equal(displayProcess(command), "node");
+  const text = describeCandidate({
+    host: "127.0.0.1",
+    port: 9,
+    label: displayProcess(command),
+    protocols: [],
+  });
+  assert.match(text, /node/);
+  assert.doesNotMatch(text, /super-secret-value|server\.js/);
+});
+
 test("labelForProcess 认出常见客户端", () => {
   assert.equal(
     labelForProcess("/Applications/Clash Verge.app/Contents/MacOS/verge-mihomo"),

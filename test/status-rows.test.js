@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { rowsFor, verdictFor } from "../src/core/status-rows.js";
+import { overviewLines, rowsFor, verdictFor } from "../src/core/status-rows.js";
 
 const base = {
   loading: false,
@@ -111,4 +111,28 @@ test("工具探测失败：标「未测出」而不是谎报「未走代理」",
   assert.doesNotMatch(row.detail, /Antigravity 未走代理/);
   // 探测失败不拖整行：另一个应用 ok 则行仍 ok
   assert.equal(row.status, "ok");
+});
+
+test("总览把隧道和模型分开，认证端口和 403 都不写成可用", () => {
+  const lines = overviewLines(
+    {
+      ...base,
+      sidecar: { ...base.sidecar, httpOpen: true, socksOpen: false },
+      upstream: {
+        chosen: null,
+        candidates: [{ host: "127.0.0.1", port: 6152, protocols: [], authRequired: ["http"], usable: false }],
+      },
+      egress: { country: "SG", restricted: false },
+    },
+    {
+      app: { name: "Cursor", running: true, proxied: "unknown" },
+      reach: { ok: true, serviceVerified: false, results: [{ httpStatus: 403 }, { httpStatus: 429 }] },
+    },
+  );
+  const text = lines.map((l) => `${l.label} ${l.detail}`).join("\n");
+  assert.match(text, /HTTP 开 :8899/);
+  assert.match(text, /需要认证/);
+  assert.match(text, /HTTP 403\/429/);
+  assert.match(text, /模型 未验证/);
+  assert.doesNotMatch(text, /目录完整|模型可用/);
 });

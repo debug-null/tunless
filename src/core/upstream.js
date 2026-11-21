@@ -49,6 +49,15 @@ export function labelForProcess(command) {
   return hit ? hit.label : null;
 }
 
+/** 界面和 doctor 只显示进程名，不打印命令行参数。参数里可能有 token。 */
+export function displayProcess(command) {
+  const known = labelForProcess(command);
+  if (known) return known;
+  const exe = String(command || "").trim().split(/\s+/)[0] || "";
+  const base = exe.split("/").pop() || "进程";
+  return base.slice(0, 40);
+}
+
 /**
  * 当前正在用的客户端是谁。
  *
@@ -196,13 +205,50 @@ export async function systemProxyCandidates() {
   return out;
 }
 
-/** 探测一个端口说的是哪种代理协议；返回 [] 表示不是代理 */
-export async function probeProtocols(host, port, timeoutMs = 1200) {
+/**
+ * 探测一个端口实际能免认证转发的协议。
+ * authRequired 里的协议认得出，但没有凭据就不能当可用上游。
+ */
+export async function probeProxy(host, port, timeoutMs = 1200) {
   const [socks5, http] = await Promise.all([
     probeSocks5(host, port, timeoutMs),
     probeHttp(host, port, timeoutMs),
   ]);
-  return [socks5 ? "socks5" : null, http ? "http" : null].filter(Boolean);
+  const protocols = [];
+  const authRequired = [];
+  if (http?.ok) (http.authRequired ? authRequired : protocols).push("http");
+  if (socks5?.ok) (socks5.authRequired ? authRequired : protocols).push("socks5");
+  return { protocols, authRequired };
+}
+
+/** 只返回免认证、可以直接用来转发的协议名 */
+export async function probeProtocols(host, port, timeoutMs = 1200) {
+  return (await probeProxy(host, port, timeoutMs)).protocols;
+}
+
+/** 候选里第一个免认证且报出了协议的上游。需要认证的端口留在列表里，但不选中。 */
+export function pickUpstream(candidates) {
+  return (candidates ?? []).find((c) => c.usable !== false && c.protocols?.length) ?? null;
+}
+
+export function upstreamFromProbe({ host, port, probed, source, detail }) {
+  const authRequired = probed?.authRequired ?? [];
+  if (!probed?.protocols?.length) {
+    return {
+      upstream: null,
+      authRequired,
+      source,
+      detail: authRequired.length
+        ? `${host}:${port} 需要认证（${authRequired.join("+")}），当前不代填凭据`
+        : `${host}:${port} 没有免认证的 HTTP/SOCKS 能力`,
+    };
+  }
+  return {
+    upstream: { host, port: Number(port), protocols: [...probed.protocols] },
+    authRequired,
+    source,
+    detail,
+  };
 }
 
 export function probeSocks5(host, port, timeoutMs = 1200) {
@@ -222,14 +268,17 @@ export function probeSocks5(host, port, timeoutMs = 1200) {
     };
     socket.setTimeout(timeoutMs, () => done(false));
     socket.once("error", () => done(false));
-    socket.once("connect", () => socket.write(Buffer.from([5, 2, 0, 2])));
+      socket.once("connect", () => socket.write(Buffer.from([5, 2, 0, 2])));
     let buf = Buffer.alloc(0);
     socket.on("data", (chunk) => {
       buf = Buffer.concat([buf, chunk]);
       if (buf.length < 2) return;
       // 回的不是 SOCKS5 握手（比如 ssh banner）—— 这不是 SOCKS 端口。
-      if (buf[0] !== 5) return done(false);
-      done(buf[0] === 5 && (buf[1] === 0 || buf[1] === 2));
+      if (buf[0] !== 5) return done(null);
+      if (buf[1] === 0) return done({ ok: true, authRequired: false });
+      // 方法 2 是用户名密码。认得出这是 SOCKS，但本轮不代填凭据。
+      if (buf[1] === 2) return done({ ok: true, authRequired: true });
+      done(null);
     });
   });
 }
@@ -271,12 +320,15 @@ export function probeHttp(host, port, timeoutMs = 1200) {
       //
       // 403 不算：macOS 的 AirPlay 接收端（7000 / 5000）对任何 CONNECT 都回
       // 403 Forbidden，会被误认成代理 —— 这两个端口是系统自带的，谁都躲不掉。
-      done(PROXY_CONNECT_STATUSES.has(Number(m[1])), false);
+      const status = Number(m[1]);
+      if (status === 407) return done({ ok: true, authRequired: true, status });
+      if (PROXY_CONNECT_STATUSES.has(status)) return done({ ok: true, authRequired: false, status });
+      done(null);
     });
   });
 }
 
-const PROXY_CONNECT_STATUSES = new Set([200, 407, 502, 503, 504]);
+const PROXY_CONNECT_STATUSES = new Set([200, 502, 503, 504]);
 
 /** 用真实目标验证这个上游能不能出网；失败只代表「现在出不去」，不代表不是代理 */
 export async function verifyUpstream(upstream, { target = "github.com", timeoutMs = 6000 } = {}) {
@@ -394,7 +446,7 @@ export async function discoverUpstream({
     raw.push({
       ...row,
       source: label ? "known-process" : "listening",
-      label: label ?? row.process,
+      label: displayProcess(row.process),
       priority: label ? 2 : 3,
     });
   }
@@ -423,8 +475,16 @@ export async function discoverUpstream({
         const index = cursor;
         cursor += 1;
         const c = batch[index];
-        const protocols = probe ? await probeProtocols(c.host, c.port, timeoutMs) : [];
-        results[index] = { ...c, protocols, isProxy: protocols.length > 0 };
+        const probed = probe
+          ? await probeProxy(c.host, c.port, timeoutMs)
+          : { protocols: [], authRequired: [] };
+        results[index] = {
+          ...c,
+          protocols: probed.protocols,
+          authRequired: probed.authRequired,
+          isProxy: probed.protocols.length > 0 || probed.authRequired.length > 0,
+          usable: probed.protocols.length > 0,
+        };
       }
     };
     await Promise.all(Array.from({ length: Math.min(6, batch.length) }, worker));
@@ -433,15 +493,19 @@ export async function discoverUpstream({
 
   const high = await probeBatch(highPriority);
   candidates.push(...high);
-  if (!high.some((c) => c.isProxy) && lowPriority.length) {
+  if (!high.some((c) => c.usable) && lowPriority.length) {
     candidates.push(...(await probeBatch(lowPriority)));
   }
 
-  const usable = candidates.filter((c) => c.isProxy);
-  const chosen = usable[0] ?? null;
+  const chosen = pickUpstream(candidates);
   return {
     upstream: chosen
-      ? { host: chosen.host, port: chosen.port, protocols: chosen.protocols }
+      ? {
+          host: chosen.host,
+          port: chosen.port,
+          protocols: chosen.protocols,
+          authRequired: chosen.authRequired ?? [],
+        }
       : null,
     chosen,
     candidates,
@@ -450,8 +514,41 @@ export async function discoverUpstream({
 
 /** 把探测结果压成一句人话，用来解释「我为什么选了这个端口」 */
 export function describeCandidate(c) {
+  if (c.authRequired?.length && !c.protocols?.length) {
+    return `${c.host}:${c.port} ${c.label ?? ""}（需要认证：${c.authRequired.join("+")}，未当作可用上游）`.trim();
+  }
   const proto = c.protocols?.length ? c.protocols.join("+") : "不是代理";
   return `${c.host}:${c.port} ${c.label ?? ""}（${proto}）`.trim();
+}
+
+export function systemProxyPortsFromState(sys) {
+  if (!sys) return [];
+  const ports = [];
+  if (sys.httpEnabled && sys.port) ports.push(Number(sys.port));
+  if (sys.httpsEnabled && sys.httpsPort) ports.push(Number(sys.httpsPort));
+  if (sys.socksEnabled && sys.socksPort) ports.push(Number(sys.socksPort));
+  return [...new Set(ports.filter((n) => Number.isFinite(n) && n > 0))];
+}
+
+function portSetFromCandidates(list, excludePorts) {
+  const set = new Set();
+  for (const item of list ?? []) {
+    const port = Number(item?.port);
+    if (!Number.isFinite(port) || port <= 0 || excludePorts.includes(port)) continue;
+    set.add(port);
+  }
+  return set;
+}
+
+function savedSystemPorts(pinned) {
+  if (Array.isArray(pinned?.systemProxyPorts) && pinned.systemProxyPorts.length) {
+    return new Set(pinned.systemProxyPorts.map(Number).filter((n) => Number.isFinite(n) && n > 0));
+  }
+  if (pinned?.systemProxyPort !== null && pinned?.systemProxyPort !== undefined) {
+    const port = Number(pinned.systemProxyPort);
+    if (Number.isFinite(port) && port > 0) return new Set([port]);
+  }
+  return null;
 }
 
 /**
@@ -473,41 +570,41 @@ export async function detectPinnedDrift({
 } = {}) {
   if (!pinned) return { stale: false };
   const sys = systemProxy ?? (await systemProxyCandidates());
-  const other = sys.find(
-    (c) =>
-      Number(c.port) !== Number(pinned.port) && !excludePorts.includes(Number(c.port)),
-  );
-  if (!other) return { stale: false };
-
-  const protocols = probe
-    ? await probe(other.host, other.port, timeoutMs)
-    : await probeProtocols(other.host, other.port, timeoutMs);
-  if (!protocols.length) return { stale: false };
-
-  // 新版钉住值会记下「当时系统代理指向哪儿」。用户可能就是故意钉一个
-  // 跟系统代理不一样的端口（比如公司专线），这种情况必须尊重用户选择。
-  if (pinned.systemProxyPort !== null && pinned.systemProxyPort !== undefined) {
-    if (Number(pinned.systemProxyPort) === Number(other.port)) {
-      // 钉住时系统代理就已经是这个端口 —— 用户是故意的，不算漂移。
-      return { stale: false };
+  const current = portSetFromCandidates(sys, excludePorts);
+  // 钉住的端口仍在当前系统代理端口集合里：同一个客户端的 HTTP/SOCKS，不是换了客户端。
+  if (!current.size || current.has(Number(pinned.port))) return { stale: false };
+  const saved = savedSystemPorts(pinned);
+  if (saved) {
+    for (const port of saved) {
+      if (current.has(port)) return { stale: false };
     }
   }
 
-  const row = (await listeningPorts()).find((r) => r.port === Number(other.port));
-  const label = row ? labelForProcess(row.process) : null;
-  return {
-    stale: true,
-    replacement: {
-      host: other.host,
-      port: Number(other.port),
-      protocols,
-      source: "system-proxy",
-      label: label ?? "系统代理",
-    },
-    reason:
-      `你固定的 ${pinned.host}:${pinned.port} 还是旧客户端在用，` +
-      `系统代理已经切到 ${other.host}:${other.port}${label ? `（${label}）` : ""}`,
-  };
+  for (const candidate of sys) {
+    const port = Number(candidate.port);
+    if (!current.has(port)) continue;
+    const probed = probe
+      ? await probe(candidate.host, port, timeoutMs)
+      : await probeProxy(candidate.host, port, timeoutMs);
+    const protocols = Array.isArray(probed) ? probed : (probed?.protocols ?? []);
+    if (!protocols.length) continue;
+    const row = (await listeningPorts()).find((r) => r.port === port);
+    const label = row ? labelForProcess(row.process) : null;
+    return {
+      stale: true,
+      replacement: {
+        host: candidate.host,
+        port,
+        protocols,
+        source: "system-proxy",
+        label: label ?? candidate.label ?? "系统代理",
+      },
+      reason:
+        `你固定的 ${pinned.host}:${pinned.port} 还是旧客户端在用，` +
+        `系统代理已经切到 ${candidate.host}:${port}${label ? `（${label}）` : ""}`,
+    };
+  }
+  return { stale: false };
 }
 
 /**
@@ -597,8 +694,12 @@ export function loadPinnedUpstream() {
       port,
       label: "手动指定",
       pinned: true,
-      // 钉住那一刻的系统代理端口，用来判断「用户是不是换了客户端」。
-      // 老版本没有这个字段，一律当作「可能是过期钉住」。
+      // 钉住那一刻的系统代理端口集合。同一客户端的 HTTP 和 SOCKS 都算在里面。
+      systemProxyPorts: Array.isArray(data.systemProxyPorts)
+        ? data.systemProxyPorts.map(Number).filter((n) => Number.isFinite(n) && n > 0)
+        : Number.isFinite(Number(data.systemProxyPort))
+          ? [Number(data.systemProxyPort)]
+          : null,
       systemProxyPort: Number.isFinite(Number(data.systemProxyPort))
         ? Number(data.systemProxyPort)
         : null,
@@ -608,12 +709,27 @@ export function loadPinnedUpstream() {
   }
 }
 
-export function savePinnedUpstream({ host = "127.0.0.1", port, systemProxyPort = null }) {
+export function savePinnedUpstream({
+  host = "127.0.0.1",
+  port,
+  systemProxyPort = null,
+  systemProxyPorts = null,
+}) {
+  const ports = Array.isArray(systemProxyPorts)
+    ? [...new Set(systemProxyPorts.map(Number).filter((n) => Number.isFinite(n) && n > 0))]
+    : systemProxyPort === null || systemProxyPort === undefined
+      ? []
+      : [Number(systemProxyPort)].filter((n) => Number.isFinite(n) && n > 0);
   fs.mkdirSync(dataDir(), { recursive: true });
   fs.writeFileSync(
     upstreamFile(),
     `${JSON.stringify(
-      { host, port: Number(port), systemProxyPort: systemProxyPort === null ? null : Number(systemProxyPort) },
+      {
+        host,
+        port: Number(port),
+        systemProxyPort: ports[0] ?? null,
+        systemProxyPorts: ports,
+      },
       null,
       2,
     )}\n`,

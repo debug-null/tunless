@@ -7,8 +7,9 @@
 // 主题：启动时用 OSC 11 询问终端背景色，按亮暗切换配色；
 // 终端不支持 Unicode 时符号与边框降级成 ASCII。
 
+import "../color-env.js";
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { render, Box, Text, useApp, useInput, useStdout } from "ink";
+import { render, Box, Text, useApp, useInput, useStdout, useWindowSize } from "ink";
 import { h, ThemeProvider, useTheme } from "./ui.js";
 import { getTheme, detectUnicode } from "./theme.js";
 import { queryTerminalColorScheme, themeFromEnv } from "./terminal-theme.js";
@@ -49,13 +50,15 @@ import {
   probeProtocols,
   parseUpstream,
   savePinnedUpstream,
+  systemProxyPortsFromState,
 } from "../core/upstream.js";
-import { rowsFor, verdictFor } from "../core/status-rows.js";
+import { overviewLines, rowsFor, verdictFor } from "../core/status-rows.js";
 import { createReporter } from "../cli/report.js";
 
 export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const { exit } = useApp();
   const { stdout } = useStdout();
+  const windowSize = useWindowSize();
   const theme = useTheme();
 
   const [state, setState] = useState(emptyState);
@@ -73,6 +76,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const [appId, setAppId] = useState(null);
   // 第 2 步：选中的处理方式 + 执行结果
   const [actionIndex, setActionIndex] = useState(0);
+  const [writeArmed, setWriteArmed] = useState(false);
   // 第 2 步：选哪个上游代理（探测出来的候选，或手动填）
   const [upstreamIndex, setUpstreamIndex] = useState(0);
   const [editingUpstream, setEditingUpstream] = useState(false);
@@ -144,7 +148,18 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     }
   }, [appId, state.sidecar?.httpPort]);
 
+  const refreshAbort = useRef(null);
   const refresh = useCallback(async () => {
+    if (refreshAbort.current) {
+      refreshAbort.current.abort();
+      setState((prev) => ({ ...prev, loading: false }));
+      setBusy(false);
+      setProgress("");
+      setHint("检测已取消。等这一轮网络探测停下后再按 r");
+      return null;
+    }
+    const ac = new AbortController();
+    refreshAbort.current = ac;
     setBusy(true);
     setProgress("正在采集…");
     try {
@@ -152,22 +167,34 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         internalDns,
         repoRoots,
         includeChrome,
+        signal: ac.signal,
         onProgress: (stage, partial) => {
+          if (ac.signal.aborted) return;
           setProgress(stage);
-          setState((prev) => ({ ...prev, ...partial }));
+          setState((prev) => ({ ...prev, ...partial, loading: true }));
         },
       });
+      if (ac.signal.aborted) {
+        setState((prev) => ({ ...prev, loading: false }));
+        return null;
+      }
       setState(next);
       await refreshLive();
       log(`状态已更新（内网域名 ${next.internalDomains.length} 个）`, "ok");
-      setBusy(false);
-      setProgress("");
       return next;
     } catch (err) {
-      log(`刷新失败：${err.message}`, "bad");
+      setState((prev) => ({ ...prev, loading: false }));
+      if (ac.signal.aborted || err.name === "AbortError") {
+        setHint("检测已取消");
+        return null;
+      }
+      log(`刷新失败：${err.message}。按 r 重试`, "bad");
+      setHint(`刷新失败：${err.message}。按 r 重试`);
+      return null;
+    } finally {
+      if (refreshAbort.current === ac) refreshAbort.current = null;
       setBusy(false);
       setProgress("");
-      return null;
     }
   }, [internalDns, repoRoots, includeChrome, log, refreshLive]);
 
@@ -430,10 +457,12 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     setExecuting(null);
     const okCount = result.results.filter((r) => r.ok).length;
     log(
-      result.ok
-        ? `连通性正常 — ${okCount}/${result.results.length} 个目标可达`
-        : `连通性有问题 — ${result.failedRequired.length} 个必需目标不通`,
-      result.ok ? "ok" : "bad",
+      result.serviceVerified
+        ? `服务调用已通过 — ${okCount}/${result.results.length}`
+        : result.ok
+          ? `隧道到达 ${okCount}/${result.results.length}，服务未验证`
+          : `隧道未建立 — ${result.failedRequired.length} 个必需目标不通`,
+      result.serviceVerified ? "ok" : result.ok ? "warn" : "bad",
     );
     return result;
   }, [state.sidecar.httpPort, appId, appName, log]);
@@ -446,11 +475,20 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
    */
   const adoptUpstream = useCallback(
     async (candidate) => {
+      if (candidate.authRequired?.length && !candidate.protocols?.length) {
+        log(`${candidate.host}:${candidate.port} 需要认证（${candidate.authRequired.join("+")}），当前不代填凭据`, "warn");
+        setHint("这个端口要认证。本轮不会把它当成可用上游");
+        return;
+      }
       const upstream = {
         host: candidate.host,
         port: candidate.port,
-        protocols: candidate.protocols ?? ["http", "socks5"],
+        protocols: candidate.protocols ?? [],
       };
+      if (!upstream.protocols.length) {
+        log(`${candidate.host}:${candidate.port} 没有免认证的 HTTP/SOCKS`, "bad");
+        return;
+      }
       setVerifying(true);
       setVerifyResult(null);
       setState((prev) => ({
@@ -481,12 +519,12 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       try {
         // 记下此刻系统代理的端口：以后系统代理变了，能分清
         // 「用户换了客户端」还是「用户自己又选回了这个端口」。
-        const sys = state.systemProxy;
+        const systemProxyPorts = systemProxyPortsFromState(state.systemProxy);
         savePinnedUpstream({
           host: upstream.host,
           port: upstream.port,
-          systemProxyPort:
-            sys && sys.httpEnabled && sys.port ? Number(sys.port) : null,
+          systemProxyPorts,
+          systemProxyPort: systemProxyPorts[0] ?? null,
         });
         log(`上游代理已固定为 ${upstream.host}:${upstream.port}`, "ok");
       } catch (err) {
@@ -744,6 +782,13 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       return;
     }
 
+    // 原始模式里 Ctrl+D 只是字符 \x04，不是操作系统的 EOF。
+    // 把它当成退出，避免用户按了没反应。
+    if (key.ctrl && input === "d") {
+      exit();
+      return;
+    }
+
     if (input === "q") {
       exit();
       return;
@@ -788,6 +833,23 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     if (screen === "dashboard") {
       const apps = (state.apps ?? []).filter((a) => a.installed === true);
 
+      if (input === "c") {
+        const app = apps[Math.min(appIndex, Math.max(0, apps.length - 1))];
+        if (!app) {
+          setHint("没有可配置的已安装工具");
+          return;
+        }
+        setAppId(app.id);
+        setAppName(app.name);
+        setActionIndex(0);
+        setWriteArmed(false);
+        setScreen("wizard");
+        setWizardStep(3);
+        setWizardDone(false);
+        setStepResult(null);
+        setHint("配置不会自动写入。选中会改文件的项后回车，再按 y 确认");
+        return;
+      }
       if (input === "g") {
         setScreen("wizard");
         setWizardStep(1);
@@ -816,53 +878,34 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         return;
       }
       if (key.return) {
-        // 动作在跑时回车不能再起一个 —— launchApp 是真副作用（quit + open）。
-        if (executing || busy) return;
         const app = apps[Math.min(appIndex, Math.max(0, apps.length - 1))];
-        if (!app) return;
-
-        // 配置路径：按应用挑动作 —— Codex 没有 settings.json，「注入+启动」
-        // 对它没意义；actionsFor 返回的是这个应用的真实选项。
-        const configure = () => {
-          const ids = actionsFor(app.id).map((a) => a.id);
-          const actionId = ids.includes("env+settings") ? "env+settings" : ids[0];
-          setHint("");
-          setExecuting(`正在为 ${app.name} 配置代理`);
-          applyAppAction(app, actionId).then((res) => {
-            setExecuting(null);
-            if (res) {
-              setHint(typeof res === "string" ? res : `✔ ${app.name} 代理配置已生效`);
-            }
-          });
-        };
-
-        // 第二阶段：上次实测没过，这次回车是「重启修复」。
-        if (pendingFix === app.id) {
-          setPendingFix(null);
-          setExecuting(`正在重启 ${app.name} 并注入代理`);
-          configure();
+        if (!app) {
+          setHint("没有已安装的工具，回车不会改配置。按 q 退出");
+          return;
+        }
+        // 动作在跑时回车不能再起一个 —— launchApp 是真副作用（quit + open）。
+        if (executing || busy) {
+          setHint("检测还在跑。再按 r 取消");
           return;
         }
 
-        if (app.proxied === "ok") {
-          // 先真测：经 sidecar 打这个工具自己的目标。测的是隧道层——
-          // 隧道通但应用内部状态坏的情况也存在，所以无论结果如何，
-          // 再按一次回车都给「重启并重新注入」这条修复路径。
-          setHint("");
-          runReach(app.id).then((r) => {
-            if (!r) return;
-            const okCount = r.results.filter((x) => x.ok).length;
-            setPendingFix(app.id);
-            setHint(
-              r.ok
-                ? `✔ ${app.name} 连通正常（${okCount}/${r.results.length} 个目标可达）— 仍有问题？再按回车重启并重新注入`
-                : `✖ ${app.name} 有 ${r.results.length - okCount}/${r.results.length} 个目标不通 — 再按回车重启并注入代理`,
-            );
-          });
+        if (!state.sidecar?.running) {
+          setHint("转发服务没在听。按空格启动后再回车测隧道。这一步不改配置");
           return;
         }
-
-        configure();
+        setHint("");
+        runReach(app.id).then((r) => {
+          if (!r) return;
+          const codes = r.results.map((x) => x.httpStatus).filter((n) => Number.isFinite(n));
+          setState((prev) => ({ ...prev, reach: r }));
+          setHint(
+            r.serviceVerified
+              ? `${app.name} 模型调用已验证`
+              : r.ok
+                ? `${app.name} 隧道到达${codes.length ? ` HTTP ${codes.join("/")}` : ""}，模型未验证`
+                : `${app.name} 隧道没建立。模型仍是未验证，按 c 看配置`,
+          );
+        });
         return;
       }
       if (key.upArrow || input === "k") {
@@ -885,7 +928,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       if (key.upArrow || input === "k") {
         // 滚到「最早一窗」就停：再往上窗口越削越薄，没有更早的可看。
         // limit 与 ServiceScreen 内同一个公式（rows - 14）。
-        const limit = Math.max(5, (stdout.rows ?? 24) - 14);
+        const limit = Math.max(5, (windowSize.rows || 24) - 14);
         setEventScroll((n) => Math.min(Math.max(0, events.length - limit), n + 1));
         return;
       }
@@ -1051,21 +1094,41 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     }
 
     if (wizardStep === 3) {
+      const writesFiles = (id) => id === "settings" || id === "env+settings";
       if (key.escape) {
+        setWriteArmed(false);
         setWizardStep(2);
         setStepResult(null);
         return;
       }
-      if (key.upArrow) {
-        setActionIndex((i) => Math.max(0, i - 1));
+      const confirmNow = writeArmed && input === "y";
+      if (writeArmed && !confirmNow) {
+        setWriteArmed(false);
+        if (key.upArrow) {
+          setActionIndex((i) => Math.max(0, i - 1));
+          return;
+        }
+        if (key.downArrow) {
+          const total = actionsFor(appId).length;
+          setActionIndex((i) => Math.min(Math.max(0, total - 1), i + 1));
+          return;
+        }
+        setHint("已取消写入。方向键另选，或 Esc 返回");
         return;
       }
-      if (key.downArrow) {
-        const total = actionsFor(appId).length;
-        setActionIndex((i) => Math.min(Math.max(0, total - 1), i + 1));
-        return;
+      if (confirmNow) setWriteArmed(false);
+      if (!writeArmed) {
+        if (key.upArrow) {
+          setActionIndex((i) => Math.max(0, i - 1));
+          return;
+        }
+        if (key.downArrow) {
+          const total = actionsFor(appId).length;
+          setActionIndex((i) => Math.min(Math.max(0, total - 1), i + 1));
+          return;
+        }
       }
-      if (key.return) {
+      if (key.return || confirmNow) {
         // 动作在跑时回车不能再起一个 —— 与 apps 屏同一个守卫。
         if (executing || busy) return;
         if (stepResult) {
@@ -1074,6 +1137,12 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
           setWizardStep(4);
           setHint("");
           runReach();
+          return;
+        }
+        const pending = actionsFor(appId)[actionIndex];
+        if (pending && writesFiles(pending.id) && !confirmNow) {
+          setWriteArmed(true);
+          setHint(`将写入 ${appName} 的配置文件。按 y 确认，其它键取消`);
           return;
         }
         if (!state.sidecar.running) {
@@ -1165,12 +1234,13 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     }
   });
 
-  const width = stdout.columns || 80;
-  const rows = stdout.rows || 24;
+  const width = windowSize.columns || stdout.columns || 80;
+  const rows = windowSize.rows || stdout.rows || 24;
+  const cramped = width < 60 || rows < 18;
 
   let body;
   if (helpOpen) {
-    body = h(HelpPanel, { width });
+    body = h(HelpPanel, { width, rows });
   } else if (screen === "dashboard") {
     body = h(Workbench, { state, appIndex, hint, executing, width });
   } else if (screen === "upstream") {
@@ -1265,9 +1335,32 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
             ? h(KeyBar, { keys: DOMAINS_KEYS })
             : help;
 
+  if (cramped && !editing && !editingTarget && !editingUpstream) {
+    const brief = overviewLines(state).slice(0, Math.max(1, rows - 4));
+    return h(
+      Box,
+      { flexDirection: "column", height: rows, overflow: "hidden" },
+      brief.map((row) =>
+        h(
+          Text,
+          { key: row.id },
+          `${row.label} ${row.detail}`.slice(0, Math.max(8, width)),
+        ),
+      ),
+      h(
+        Text,
+        null,
+        `窗口 ${width}x${rows} 太小。至少 60 列、18 行。q 退出`.slice(0, Math.max(8, width)),
+      ),
+      hint
+        ? h(Text, null, hint.slice(0, Math.max(8, width)))
+        : h(Text, null, "q 退出"),
+    );
+  }
+
   return h(
     Box,
-    { flexDirection: "column", height: rows },
+    { flexDirection: "column", height: rows, overflow: "hidden" },
     screen === "dashboard"
       ? null
       : h(
@@ -1316,11 +1409,12 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
 // 仪表盘底栏按键：直观精炼，6 项常用操作
 const DASHBOARD_KEYS = [
   ["↑↓", "选工具"],
-  ["回车", "一键生效/测速"],
-  ["空格", "启停服务"],
+  ["回车", "测隧道"],
+  ["c", "配置"],
+  ["空格", "启停"],
   ["u", "上游"],
   ["d", "域名"],
-  ["h", "更多"],
+  ["r", "刷新/取消"],
   ["q", "退出"],
 ];
 
@@ -1355,6 +1449,8 @@ export async function runTui(options = {}) {
 
   // 调试模式：每帧以纯文本追加输出，方便在没有终端模拟器时观察界面内容。
   const debug = process.env.TUNLESS_TUI_DEBUG === "1";
+  const onSigint = () => process.exit(130);
+  process.on("SIGINT", onSigint);
   const instance = render(
     h(ThemeProvider, { theme, unicode }, h(App, options)),
     {
