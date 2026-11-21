@@ -136,8 +136,14 @@ pid4, fd4 = launch({})
 set_size(fd4, 24, 80)
 read_for(fd4, 1.2)
 os.write(fd4, b"\x04")
-time.sleep(0.8)
-wpid, ctrl_status = os.waitpid(pid4, os.WNOHANG)
+# ink 的 exit() 要等当前帧卸掉，比 SIGINT 的 process.exit 慢一拍。
+deadline = time.time() + 3
+wpid, ctrl_status = 0, None
+while time.time() < deadline:
+    wpid, ctrl_status = os.waitpid(pid4, os.WNOHANG)
+    if wpid != 0:
+        break
+    time.sleep(0.1)
 if wpid == 0:
     os.kill(pid4, signal.SIGKILL)
     os.waitpid(pid4, 0)
