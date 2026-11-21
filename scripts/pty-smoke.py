@@ -91,16 +91,12 @@ if pid2 == 0:
     os.execv(bin_path, [bin_path])
 read_for(fd2, 1.5)
 os.kill(pid2, signal.SIGINT)
-time.sleep(0.8)
-try:
-    os.kill(pid2, 0)
-    alive = True
-except OSError:
-    alive = False
-if alive:
+time.sleep(1.0)
+wpid, status = os.waitpid(pid2, os.WNOHANG)
+if wpid == 0:
     os.kill(pid2, signal.SIGKILL)
+    os.waitpid(pid2, 0)
     print("sigint_left_process=yes")
     sys.exit(1)
-os.waitpid(pid2, 0)
-print("sigint_left_process=no")
+print(f"sigint_left_process=no status={status}")
 os.close(fd2)
