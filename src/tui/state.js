@@ -342,7 +342,7 @@ export async function collectState({
             chosen: {
               host: pinned.host,
               port: pinned.port,
-              protocols: match?.protocols ?? ["http", "socks5"],
+              protocols: match?.protocols ?? [],
             },
             detail: match ? `${describeCandidate(match)}（已固定）` : `手动固定 ${pinned.host}:${pinned.port}`,
           };

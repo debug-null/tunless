@@ -49,6 +49,7 @@ import {
   probeProtocols,
   parseUpstream,
   savePinnedUpstream,
+  systemProxyPortsFromState,
 } from "../core/upstream.js";
 import { rowsFor, verdictFor } from "../core/status-rows.js";
 import { createReporter } from "../cli/report.js";
@@ -430,10 +431,12 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     setExecuting(null);
     const okCount = result.results.filter((r) => r.ok).length;
     log(
-      result.ok
-        ? `连通性正常 — ${okCount}/${result.results.length} 个目标可达`
-        : `连通性有问题 — ${result.failedRequired.length} 个必需目标不通`,
-      result.ok ? "ok" : "bad",
+      result.serviceVerified
+        ? `服务调用已通过 — ${okCount}/${result.results.length}`
+        : result.ok
+          ? `隧道到达 ${okCount}/${result.results.length}，服务未验证`
+          : `隧道未建立 — ${result.failedRequired.length} 个必需目标不通`,
+      result.serviceVerified ? "ok" : result.ok ? "warn" : "bad",
     );
     return result;
   }, [state.sidecar.httpPort, appId, appName, log]);
@@ -446,11 +449,20 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
    */
   const adoptUpstream = useCallback(
     async (candidate) => {
+      if (candidate.authRequired?.length && !candidate.protocols?.length) {
+        log(`${candidate.host}:${candidate.port} 需要认证（${candidate.authRequired.join("+")}），当前不代填凭据`, "warn");
+        setHint("这个端口要认证。本轮不会把它当成可用上游");
+        return;
+      }
       const upstream = {
         host: candidate.host,
         port: candidate.port,
-        protocols: candidate.protocols ?? ["http", "socks5"],
+        protocols: candidate.protocols ?? [],
       };
+      if (!upstream.protocols.length) {
+        log(`${candidate.host}:${candidate.port} 没有免认证的 HTTP/SOCKS`, "bad");
+        return;
+      }
       setVerifying(true);
       setVerifyResult(null);
       setState((prev) => ({
@@ -481,12 +493,12 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
       try {
         // 记下此刻系统代理的端口：以后系统代理变了，能分清
         // 「用户换了客户端」还是「用户自己又选回了这个端口」。
-        const sys = state.systemProxy;
+        const systemProxyPorts = systemProxyPortsFromState(state.systemProxy);
         savePinnedUpstream({
           host: upstream.host,
           port: upstream.port,
-          systemProxyPort:
-            sys && sys.httpEnabled && sys.port ? Number(sys.port) : null,
+          systemProxyPorts,
+          systemProxyPort: systemProxyPorts[0] ?? null,
         });
         log(`上游代理已固定为 ${upstream.host}:${upstream.port}`, "ok");
       } catch (err) {

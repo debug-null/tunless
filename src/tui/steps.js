@@ -268,9 +268,11 @@ export function StepReach({ state, width, reachability, appName, editingTarget, 
       const opt = r.optional && !r.ok;
       const mark = opt
         ? txt("· ", { dim: true })
-        : r.ok
+        : r.serviceVerified
           ? txt("✔ ", { color: theme.colors.ok })
-          : txt("✖ ", { color: theme.colors.bad });
+          : r.ok
+            ? txt("• ", { color: theme.colors.warn })
+            : txt("✖ ", { color: theme.colors.bad });
       rows.push([
         txt("  "),
         mark,
@@ -280,12 +282,17 @@ export function StepReach({ state, width, reachability, appName, editingTarget, 
       ]);
     }
     rows.push([txt("  ")]);
-    if (reach.ok) {
+    if (reach.serviceVerified) {
+      rows.push([
+        txt("  "),
+        txt("带账号的服务调用已通过", { color: theme.colors.ok }),
+      ]);
+    } else if (reach.ok) {
       rows.push([
         txt("  "),
         txt(
-          `${appName ?? "这些目标"}要连的域名都能经代理访问`,
-          { color: theme.colors.ok },
+          "隧道到达对端，服务未验证。401/403/429 只是 HTTP 状态",
+          { color: theme.colors.warn },
         ),
       ]);
     } else {
@@ -401,10 +408,15 @@ export function StepDone({ state, width, appName, reachability }) {
       txt("  "),
       txt(padEnd("外网", 10), { dim: true }),
       reachability?.results?.length
-        ? reachability.ok
+        ? reachability.serviceVerified
           ? txt(
-              `✔ ${reachability.results.filter((r) => r.ok).length}/${reachability.results.length} 个目标可达`,
+              `✔ ${reachability.results.filter((r) => r.serviceVerified).length}/${reachability.results.length} 个服务已验证`,
               { color: theme.colors.ok },
+            )
+          : reachability.ok
+          ? txt(
+              `• ${reachability.results.filter((r) => r.ok).length}/${reachability.results.length} 个隧道到达，服务未验证`,
+              { color: theme.colors.warn },
             )
           : txt(
               `✖ ${reachability.failedRequired?.length ?? 0} 个目标不通`,

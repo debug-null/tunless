@@ -10,7 +10,7 @@
 // core API, so no proxy credentials or node names are ever handled here.
 
 import net from "node:net";
-import { queryA } from "./dns.js";
+import { isFakeIp, isPrivateIp, queryA } from "./dns.js";
 import { loadRules, matchHostRules, matchIpRules } from "./rules.js";
 
 const CRLF = "\r\n";
@@ -87,19 +87,106 @@ export function splitHostPort(target, defaultPort) {
   return { host: value.slice(0, idx), port: Number(value.slice(idx + 1)) || defaultPort };
 }
 
+/** refuse：解析失败或不是私网地址时 502，不把企业域名发给上游。upstream：调用方明确接受泄露。 */
+export function normalizeInternalFallback(value) {
+  return String(value ?? "refuse").toLowerCase() === "upstream" ? "upstream" : "refuse";
+}
+
+/**
+ * 内网后缀查到的地址怎么处理。
+ * 只有私网地址直连。公网答复、假 IP、DNS 失败默认拒绝，避免把名字交给公网代理。
+ */
+export function planInternalConnect(ips, { ok = true, fallback = "refuse" } = {}) {
+  const list = Array.isArray(ips) ? ips.filter(Boolean) : [];
+  const mode = normalizeInternalFallback(fallback);
+  const privateIp = list.find((ip) => isPrivateIp(ip) && !isFakeIp(ip));
+  if (ok && privateIp) return { action: "direct", ip: privateIp, reason: "private", leak: false };
+  let reason = "no-address";
+  if (!ok) reason = "dns-failed";
+  else if (!list.length) reason = "no-address";
+  else if (list.every((ip) => isFakeIp(ip))) reason = "fake-ip";
+  else reason = "public-answer";
+  if (mode === "upstream") return { action: "upstream", reason, leak: true };
+  return { action: "refuse", reason, leak: false };
+}
+
 export async function resolveInternal(host, internalDns, timeout = 3000, cache = null) {
   if (!internalDns) return null;
   const key = normalizeHost(host);
   const cached = cache?.get(key);
   if (cached && cached.expire > Date.now()) return cached.ip;
   const res = await queryA(host, internalDns, { timeout });
-  // Prefer a private address; a fake-ip answer means the core still hijacks it.
-  const ip =
-    res.ok && res.ips.length
-      ? (res.ips.find((item) => !item.startsWith("198.18.")) ?? null)
-      : null;
+  // 只把私网地址交给直连。公网答复和假 IP 不能从这里漏出去。
+  const plan = planInternalConnect(res.ok ? res.ips : [], { ok: !!res.ok, fallback: "refuse" });
+  const ip = plan.action === "direct" ? plan.ip : null;
   cache?.set(key, { ip, expire: Date.now() + 30_000 });
   return ip;
+}
+
+function refuseInternal(socket, reason) {
+  const body = `internal-refuse:${reason}\n`;
+  if (socket.destroyed) return;
+  socket.end(
+    "HTTP/1.1 502 Bad Gateway\r\n" +
+      "Content-Type: text/plain; charset=utf-8\r\n" +
+      `Content-Length: ${Buffer.byteLength(body)}\r\n` +
+      "Connection: close\r\n" +
+      "X-Tunless-Internal: refuse\r\n\r\n" +
+      body,
+  );
+}
+
+function gateway(socket, code) {
+  const reason = code === 504 ? "Gateway Timeout" : "Bad Gateway";
+  if (!socket.destroyed) socket.end(`HTTP/1.1 ${code} ${reason}\r\nConnection: close\r\n\r\n`);
+}
+
+async function lookupInternalDns(self, host) {
+  if (!self.internalDns) return { ok: false, ips: [] };
+  const key = normalizeHost(host);
+  const cached = self.dnsCache.get(key);
+  if (cached && cached.expire > Date.now()) return cached.value;
+  const res = await queryA(host, self.internalDns, {
+    timeout: self.internalDnsTimeout ?? 3000,
+    port: self.internalDnsPort ?? 53,
+  });
+  const value = { ok: !!res.ok, ips: res.ok ? res.ips : [] };
+  self.dnsCache.set(key, { value, expire: Date.now() + 30_000 });
+  return value;
+}
+
+/** 双向转发。close（不是半关闭的 end）才拆掉对端，已发送的请求不自动重试。 */
+function linkTunnel(client, upstream) {
+  client.pipe(upstream);
+  upstream.pipe(client);
+  const drop = (peer) => {
+    if (!peer.destroyed) peer.destroy();
+  };
+  client.on("close", () => drop(upstream));
+  upstream.on("close", () => drop(client));
+  client.on("error", () => drop(upstream));
+  upstream.on("error", () => drop(client));
+}
+
+function readHeadDeadline(socket, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => finish(new Error("timeout")), timeoutMs);
+    const onError = (err) => finish(err instanceof Error ? err : new Error("error"));
+    const onClose = () => finish(new Error("closed"));
+    const finish = (err, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.off("error", onError);
+      socket.off("close", onClose);
+      if (err) reject(err);
+      else resolve(value);
+    };
+    socket.on("error", onError);
+    socket.on("close", onClose);
+    readHead(socket, (text, rest) => finish(null, { text, rest }));
+  });
 }
 
 function readHead(socket, onHead) {
@@ -292,11 +379,14 @@ async function openUpstreamHttpCore(socket, host, port) {
  * @param {{host: string, port: number, protocols?: string[]}} upstream
  */
 export function openUpstreamTunnel(upstream, host, port, timeout = 8000) {
-  const protocols = upstream.protocols ?? ["socks5", "http"];
+  const protocols = upstream.protocols ?? [];
   if (protocols.includes("socks5")) {
     return openUpstreamSocks(upstream, host, port, timeout);
   }
-  return openUpstreamHttp(upstream, host, port, timeout);
+  if (protocols.includes("http")) {
+    return openUpstreamHttp(upstream, host, port, timeout);
+  }
+  return Promise.reject(new Error("上游没有免认证的 HTTP/SOCKS 能力"));
 }
 
 export class HttpProxyServer {
@@ -307,6 +397,10 @@ export class HttpProxyServer {
     internalDns = null,
     internalSuffixes = [],
     rules = null,
+    internalDnsPort = 53,
+    internalDnsTimeout = 3000,
+    internalFallback = "refuse",
+    handshakeTimeout = 8000,
     log = () => {},
   } = {}) {
     this.port = port;
@@ -315,6 +409,10 @@ export class HttpProxyServer {
     this.internalDns = internalDns;
     this.internalSuffixes = internalSuffixes;
     this.rules = rules;
+    this.internalDnsPort = internalDnsPort;
+    this.internalDnsTimeout = internalDnsTimeout;
+    this.internalFallback = normalizeInternalFallback(internalFallback);
+    this.handshakeTimeout = handshakeTimeout;
     this.log = log;
     this.server = null;
     // 判定结果缓存：加了 CIDR 规则后每条 CONNECT 都要打内网 DNS，
@@ -324,7 +422,7 @@ export class HttpProxyServer {
   }
 
   start() {
-    this.server = net.createServer((socket) => this.handle(socket));
+    this.server = net.createServer({ allowHalfOpen: true }, (socket) => this.handle(socket));
     return new Promise((resolve, reject) => {
       this.server.once("error", reject);
       this.server.listen(this.port, this.host, () => resolve(this));
@@ -379,6 +477,73 @@ export class HttpProxyServer {
     });
   }
 
+  track(socket) {
+    this.sockets ??= new Set();
+    this.sockets.add(socket);
+    socket.once("close", () => this.sockets.delete(socket));
+  }
+
+  async openDirect(socket, ip, port, rest) {
+    const direct = net.connect({ host: ip, port });
+    this.track(direct);
+    socket.on("close", () => {
+      if (!direct.destroyed) direct.destroy();
+    });
+    const timer = setTimeout(() => {
+      direct.destroy();
+      gateway(socket, 504);
+    }, this.handshakeTimeout);
+    try {
+      await new Promise((resolve, reject) => {
+        direct.once("connect", resolve);
+        direct.once("error", reject);
+      });
+      clearTimeout(timer);
+      if (!socket.destroyed) socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      if (rest?.length) direct.write(rest);
+      linkTunnel(socket, direct);
+    } catch (err) {
+      clearTimeout(timer);
+      direct.destroy();
+      this.log(`直连 ${ip}:${port} 失败：${err.message}`);
+      if (!socket.destroyed) socket.destroy();
+    }
+  }
+
+  async openHttpPassthrough(socket, head, rest) {
+    const upstreamSocket = net.connect(this.upstream.port, this.upstream.host);
+    this.track(upstreamSocket);
+    socket.on("close", () => {
+      if (!upstreamSocket.destroyed) upstreamSocket.destroy();
+    });
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      upstreamSocket.destroy();
+    }, this.handshakeTimeout);
+    try {
+      await new Promise((resolve, reject) => {
+        upstreamSocket.once("connect", resolve);
+        upstreamSocket.once("error", reject);
+      });
+      const lines = head.headers.map(([n, v]) => `${n}: ${v}`).join("\r\n");
+      upstreamSocket.write(
+        `${head.method} ${head.target} ${head.version || "HTTP/1.1"}\r\n${lines}\r\n\r\n`,
+      );
+      const replied = await readHeadDeadline(upstreamSocket, this.handshakeTimeout);
+      clearTimeout(timer);
+      if (!socket.destroyed) socket.write(`${replied.text}\r\n\r\n`);
+      if (replied.rest?.length) socket.write(replied.rest);
+      if (rest?.length) upstreamSocket.write(rest);
+      linkTunnel(socket, upstreamSocket);
+    } catch (err) {
+      clearTimeout(timer);
+      if (!upstreamSocket.destroyed) upstreamSocket.destroy();
+      this.log(`上游握手失败：${err.message}`);
+      gateway(socket, timedOut || err.message === "timeout" ? 504 : 502);
+    }
+  }
+
   async handleConnect(socket, head, rest) {
     const { host, port } = splitHostPort(head.target, 443);
     let route = decideRouteWithRules(host, {
@@ -392,70 +557,46 @@ export class HttpProxyServer {
     this.log(`CONNECT ${host}:${port} -> ${route}`);
 
     if (route === "internal") {
-      const ip = await resolveInternal(host, this.internalDns, 3000, this.dnsCache);
-      if (!ip) {
-        socket.end("HTTP/1.1 502 Bad Gateway\r\n\r\n");
+      const looked = await lookupInternalDns(this, host);
+      const plan = planInternalConnect(looked.ips, { ok: looked.ok, fallback: this.internalFallback });
+      if (plan.action === "direct") {
+        await this.openDirect(socket, plan.ip, port, rest);
         return;
       }
-      const direct = net.connect(port, ip, () => {
-        socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
-        direct.write(rest ?? Buffer.alloc(0));
-        socket.pipe(direct);
-        direct.pipe(socket);
-      });
-      direct.on("error", (err) => {
-        this.log(`CONNECT ${host}:${port} 直连失败：${err.message}`);
-        socket.destroy();
-      });
-      socket.on("error", () => direct.destroy());
-      return;
+      if (plan.action !== "upstream") {
+        this.log(`CONNECT ${host}:${port} 内网拒绝（${plan.reason}），未发给上游`);
+        refuseInternal(socket, plan.reason);
+        return;
+      }
+      this.log(`CONNECT ${host}:${port} 内网回退上游（${plan.reason}），该域名会发给代理`);
     }
 
-    // Upstream route.
-    //
-    // 上游同时支持 HTTP 代理时，直接把 CONNECT 原样转发，最省事也最保真。
-    // 上游只有 SOCKS5（sing-box / v2ray 常见）时，转发是行不通的，得由我们
-    // 自己跑一遍 SOCKS5 握手再回一个 200。
-    const protocols = this.upstream.protocols ?? ["http"];
+    // 只使用探测确认过的协议。有 HTTP 就原样 CONNECT；只有 SOCKS5 才由我们握手。
+    // 握手失败不重发已经交给上游的请求。
+    const protocols = this.upstream.protocols ?? [];
     if (protocols.includes("http")) {
-      const upstreamSocket = net.connect(this.upstream.port, this.upstream.host, () => {
-        upstreamSocket.write(
-          `${head.method} ${head.target} ${head.version || "HTTP/1.1"}\r\n${head.headers
-            .map(([n, v]) => `${n}: ${v}`)
-            .join("\r\n")}\r\n\r\n`,
-        );
-        readHead(upstreamSocket, (text, upstreamRest) => {
-          socket.write(`${text}\r\n\r\n`);
-          // 上游响应头之后可能紧跟隧道里提前到达的数据 —— 必须转给客户端。
-          if (upstreamRest?.length) socket.write(upstreamRest);
-          upstreamSocket.write(rest ?? Buffer.alloc(0));
-          socket.pipe(upstreamSocket);
-          upstreamSocket.pipe(socket);
-        });
-      });
-      upstreamSocket.on("error", (err) => {
-        this.log(`CONNECT ${host}:${port} 上游失败：${err.message}`);
-        socket.destroy();
-      });
-      socket.on("error", () => upstreamSocket.destroy());
+      await this.openHttpPassthrough(socket, head, rest);
+      return;
+    }
+    if (!protocols.includes("socks5")) {
+      this.log(`CONNECT ${host}:${port} 上游没有免认证协议`);
+      gateway(socket, 502);
       return;
     }
 
     let upstreamSocket;
     try {
-      upstreamSocket = await openUpstreamSocks(this.upstream, host, port);
+      upstreamSocket = await openUpstreamSocks(this.upstream, host, port, this.handshakeTimeout);
     } catch (err) {
       this.log(`CONNECT ${host}:${port} 上游 SOCKS5 失败：${err.message}`);
-      socket.end("HTTP/1.1 502 Bad Gateway\r\n\r\n");
+      gateway(socket, 502);
       return;
     }
+    this.track(upstreamSocket);
     socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
     if (upstreamSocket.early?.length) socket.write(upstreamSocket.early);
     upstreamSocket.write(rest ?? Buffer.alloc(0));
-    socket.pipe(upstreamSocket);
-    upstreamSocket.pipe(socket);
-    upstreamSocket.on("error", () => socket.destroy());
-    socket.on("error", () => upstreamSocket.destroy());
+    linkTunnel(socket, upstreamSocket);
   }
 
   async handlePlain(socket, head, rest) {
@@ -482,71 +623,83 @@ export class HttpProxyServer {
     }
     this.log(`GET ${host}:${port} -> ${route}`);
 
-    if (route === "upstream") {
-      const protocols = this.upstream.protocols ?? ["http"];
-      // 上游只有 SOCKS5 时不认识绝对 URI 形式的请求，必须先打隧道再
-      // 改成 origin-form 发过去，否则会把签名原样塞给 SOCKS 服务器。
-      if (!protocols.includes("http")) {
-        let tunnel;
-        try {
-          tunnel = await openUpstreamTunnel(this.upstream, host, port);
-        } catch (err) {
-          this.log(`GET ${host}:${port} 上游 SOCKS5 失败：${err.message}`);
-          socket.end("HTTP/1.1 502 Bad Gateway\r\n\r\n");
-          return;
-        }
-        tunnel.write(
-          rewriteHead(head, {
-            method: head.method,
-            path: `${url.pathname}${url.search}`,
-            host: url.host,
-          }),
-        );
-        tunnel.write(rest ?? Buffer.alloc(0));
-        if (tunnel.early?.length) socket.write(tunnel.early);
-        socket.pipe(tunnel);
-        tunnel.pipe(socket);
-        tunnel.on("error", () => socket.destroy());
-        socket.on("error", () => tunnel.destroy());
+    if (route === "internal") {
+      const looked = await lookupInternalDns(this, host);
+      const plan = planInternalConnect(looked.ips, { ok: looked.ok, fallback: this.internalFallback });
+      if (plan.action === "direct") {
+        const targetSocket = net.connect({ host: plan.ip, port });
+        this.track(targetSocket);
+        socket.on("close", () => {
+          if (!targetSocket.destroyed) targetSocket.destroy();
+        });
+        targetSocket.once("connect", () => {
+          targetSocket.write(
+            rewriteHead(head, {
+              method: head.method,
+              path: `${url.pathname}${url.search}`,
+              host: url.host,
+            }),
+          );
+          targetSocket.write(rest ?? Buffer.alloc(0));
+          linkTunnel(socket, targetSocket);
+        });
+        targetSocket.once("error", (err) => {
+          this.log(`GET ${host}:${port} 直连失败：${err.message}`);
+          if (!socket.destroyed) socket.destroy();
+        });
         return;
       }
-      const upstreamSocket = net.connect(this.upstream.port, this.upstream.host, () => {
-        upstreamSocket.write(
-          `${head.method} ${head.target} HTTP/1.1\r\n${head.headers
-            .map(([n, v]) => `${n}: ${v}`)
-            .join("\r\n")}\r\n\r\n`,
-        );
-        upstreamSocket.write(rest ?? Buffer.alloc(0));
-        socket.pipe(upstreamSocket);
-        upstreamSocket.pipe(socket);
-      });
-      upstreamSocket.on("error", (err) => {
-        this.log(`GET ${host}:${port} 上游失败：${err.message}`);
-        socket.destroy();
-      });
-      socket.on("error", () => upstreamSocket.destroy());
-      return;
+      if (plan.action !== "upstream") {
+        this.log(`GET ${host}:${port} 内网拒绝（${plan.reason}），未发给上游`);
+        refuseInternal(socket, plan.reason);
+        return;
+      }
+      this.log(`GET ${host}:${port} 内网回退上游（${plan.reason}），该域名会发给代理`);
     }
 
-    const ip = await resolveInternal(host, this.internalDns, 3000, this.dnsCache);
-    if (!ip) {
-      socket.end("HTTP/1.1 502 Bad Gateway\r\n\r\n");
-      return;
-    }
-    const targetSocket = net.connect(port, ip, () => {
-      targetSocket.write(
+    const protocols = this.upstream.protocols ?? [];
+    // 上游只有 SOCKS5 时不认识绝对 URI 形式的请求，必须先打隧道再
+    // 改成 origin-form 发过去，否则会把签名原样塞给 SOCKS 服务器。
+    if (!protocols.includes("http")) {
+      let tunnel;
+      try {
+        tunnel = await openUpstreamTunnel(this.upstream, host, port, this.handshakeTimeout);
+      } catch (err) {
+        this.log(`GET ${host}:${port} 上游失败：${err.message}`);
+        gateway(socket, 502);
+        return;
+      }
+      this.track(tunnel);
+      tunnel.write(
         rewriteHead(head, {
           method: head.method,
           path: `${url.pathname}${url.search}`,
           host: url.host,
         }),
       );
-      targetSocket.write(rest ?? Buffer.alloc(0));
-      socket.pipe(targetSocket);
-      targetSocket.pipe(socket);
+      tunnel.write(rest ?? Buffer.alloc(0));
+      if (tunnel.early?.length) socket.write(tunnel.early);
+      linkTunnel(socket, tunnel);
+      return;
+    }
+    const upstreamSocket = net.connect(this.upstream.port, this.upstream.host);
+    this.track(upstreamSocket);
+    socket.on("close", () => {
+      if (!upstreamSocket.destroyed) upstreamSocket.destroy();
     });
-    targetSocket.on("error", () => socket.destroy());
-    socket.on("error", () => targetSocket.destroy());
+    upstreamSocket.once("connect", () => {
+      upstreamSocket.write(
+        `${head.method} ${head.target} HTTP/1.1\r\n${head.headers
+          .map(([n, v]) => `${n}: ${v}`)
+          .join("\r\n")}\r\n\r\n`,
+      );
+      upstreamSocket.write(rest ?? Buffer.alloc(0));
+      linkTunnel(socket, upstreamSocket);
+    });
+    upstreamSocket.once("error", (err) => {
+      this.log(`GET ${host}:${port} 上游失败：${err.message}`);
+      if (!socket.destroyed) socket.destroy();
+    });
   }
 }
 
@@ -558,6 +711,10 @@ export class Socks5Server {
     internalDns = null,
     internalSuffixes = [],
     rules = null,
+    internalDnsPort = 53,
+    internalDnsTimeout = 3000,
+    internalFallback = "refuse",
+    handshakeTimeout = 8000,
     log = () => {},
   } = {}) {
     this.port = port;
@@ -566,6 +723,10 @@ export class Socks5Server {
     this.internalDns = internalDns;
     this.internalSuffixes = internalSuffixes;
     this.rules = rules;
+    this.internalDnsPort = internalDnsPort;
+    this.internalDnsTimeout = internalDnsTimeout;
+    this.internalFallback = normalizeInternalFallback(internalFallback);
+    this.handshakeTimeout = handshakeTimeout;
     this.log = log;
     this.server = null;
     this.ipRouteCache = new Map();
@@ -573,7 +734,7 @@ export class Socks5Server {
   }
 
   start() {
-    this.server = net.createServer((socket) => this.handle(socket));
+    this.server = net.createServer({ allowHalfOpen: true }, (socket) => this.handle(socket));
     return new Promise((resolve, reject) => {
       this.server.once("error", reject);
       this.server.listen(this.port, this.host, () => resolve(this));
@@ -640,18 +801,25 @@ export class Socks5Server {
     let upstreamSocket;
     try {
       if (route === "internal") {
-        const ip = await resolveInternal(host, this.internalDns, 3000, this.dnsCache);
-        if (!ip) {
+        const looked = await lookupInternalDns(this, host);
+        const plan = planInternalConnect(looked.ips, { ok: looked.ok, fallback: this.internalFallback });
+        if (plan.action === "refuse" || (plan.action !== "direct" && plan.action !== "upstream")) {
+          this.log(`SOCKS5 ${host}:${port} 内网拒绝（${plan.reason}），未发给上游`);
           socket.write(Buffer.from([5, 1, 0, 1, 0, 0, 0, 0, 0, 0]));
           return socket.destroy();
         }
-        upstreamSocket = net.connect(port, ip);
-        await new Promise((resolve, reject) => {
-          upstreamSocket.once("connect", resolve);
-          upstreamSocket.once("error", reject);
-        });
+        if (plan.action === "upstream") {
+          this.log(`SOCKS5 ${host}:${port} 内网回退上游（${plan.reason}），该域名会发给代理`);
+          upstreamSocket = await openUpstreamTunnel(this.upstream, host, port, this.handshakeTimeout);
+        } else {
+          upstreamSocket = net.connect(port, plan.ip);
+          await new Promise((resolve, reject) => {
+            upstreamSocket.once("connect", resolve);
+            upstreamSocket.once("error", reject);
+          });
+        }
       } else {
-        upstreamSocket = await openUpstreamTunnel(this.upstream, host, port);
+        upstreamSocket = await openUpstreamTunnel(this.upstream, host, port, this.handshakeTimeout);
       }
     } catch (err) {
       this.log(`SOCKS5 ${host}:${port} 失败：${err.message}`);
@@ -665,13 +833,17 @@ export class Socks5Server {
     releaseReader(socket);
     releaseReader(upstreamSocket);
     socket.setTimeout(0);
+    this.track(upstreamSocket);
     socket.write(Buffer.from([5, 0, 0, 1, 0, 0, 0, 0, 0, 0]));
     if (upstreamSocket.early?.length) socket.write(upstreamSocket.early);
     if (clientEarly?.length) upstreamSocket.write(clientEarly);
-    socket.pipe(upstreamSocket);
-    upstreamSocket.pipe(socket);
-    upstreamSocket.on("error", () => socket.destroy());
-    socket.on("error", () => upstreamSocket.destroy());
+    linkTunnel(socket, upstreamSocket);
+  }
+
+  track(socket) {
+    this.sockets ??= new Set();
+    this.sockets.add(socket);
+    socket.once("close", () => this.sockets.delete(socket));
   }
 }
 

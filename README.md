@@ -14,9 +14,10 @@ tunless 把这两件事分开：
 
 **与具体客户端无关**：tunless 不假设你装的是 Clash Verge。它会自动找出本机的上游代理 ——
 优先用 [mihomo](https://github.com/MetaCubeX/mihomo) REST 接口报出的混合端口，
-认不出来就退回 macOS 系统代理（`scutil --proxy`），最后扫本机监听端口并按
-HTTP / SOCKS5 协议实测，只有真的会代理的端口才算数。
-Surge、Stash、ClashX、mihomo-party、sing-box、v2ray 都能直接接上。
+再按 HTTP / SOCKS5 实测这个端口真正免认证支持哪种协议，认不出来就退回 macOS 系统代理
+（`scutil --proxy`），最后扫本机监听端口。需要认证的端口会标出来，但不会当成已经可用。
+Surge、Stash、ClashX、mihomo-party、sing-box、v2ray 能接上的前提，是它们开了本地
+HTTP 或 SOCKS 入站，并且这个入站不要求代填用户名密码。
 
 只有「写内网 DNS 分流」这一步需要客户端支持：Clash Verge Rev 写当前订阅的 merge 增强层
 （订阅更新后仍保留），其他 mihomo 系直接改配置文件后热重载；不支持的客户端只做转发，
@@ -369,9 +370,16 @@ github 通不通跟它能不能登录毫无关系。
 | Cursor | `api2.cursor.sh`、`api3.cursor.sh`、`api.cursor.com`、`agentn.global.api5.cursor.sh` |
 | Codex | `chatgpt.com`、`api.openai.com` |
 
-判定标准是「服务器真的回了 HTTP」，不是 200：
-`oauth2.googleapis.com/token` 用 GET 打必然不是 200，但收到 404 就说明
-隧道通了、TLS 握手完成了、对端活着。一律要求 200 会把「其实能用」误判成坏掉。
+判定分成几层：本地入口、CONNECT 隧道、TLS、HTTP 状态、服务是否已验证。
+收到 401/403/429 会保留这个状态，只说明隧道到达对端，不能当成登录、配额或模型可用。
+HTTP 200 同样不是服务验证。随机二进制也不会被当成 HTTP/2 成功。
+
+内网后缀解析失败、只得到假 IP 或公网地址时，默认返回 502，不把这个域名发给上游代理。
+需要把名字交给代理时，显式加 `--internal-fallback upstream`。私网地址仍然直连。
+
+本轮不支持：到上游的 HTTPS 代理、PAC、代填代理用户名密码、SOCKS4、以及
+Shadowsocks / VMess / VLESS / Trojan / TUIC / Hysteria / WireGuard 这些远端传输。
+远端协议要由你的代理客户端自己终止，并提供本地 HTTP 或 SOCKS 入站。
 
 认不出来的工具可以 `tunless targets add` 手写任意域名 / 端口 / 路径，
 TUI 第 4 步按 `t` 也能直接加。

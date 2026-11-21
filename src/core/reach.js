@@ -40,7 +40,7 @@ export function checkReachability({
 
     const socket = net.connect({ host, port });
 
-    const finish = (ok, detail, status = null) => {
+    const finish = (ok, detail, status = null, extra = {}) => {
       if (settled) return;
       settled = true;
       clearTimeout(deadline);
@@ -49,7 +49,19 @@ export function checkReachability({
       } catch {
         // 已经断了
       }
-      resolve({ ok, detail, status, ms: Date.now() - started });
+      resolve({
+        ok,
+        detail,
+        status,
+        ms: Date.now() - started,
+        serviceVerified: false,
+        tunnelOk: false,
+        tlsOk: false,
+        httpStatus: status,
+        layer: "entry",
+        ...extra,
+        serviceVerified: false,
+      });
     };
 
     socket.setTimeout(timeoutMs, () =>
@@ -75,7 +87,10 @@ export function checkReachability({
           /^HTTP\/1\.\d (\d+)/.exec(buf.slice(0, end))?.[1] ?? 0,
         );
         if (status !== 200) {
-          finish(false, `代理拒绝了隧道（HTTP ${status || "无状态码"}）`);
+          finish(false, `代理拒绝了隧道（HTTP ${status || "无状态码"}）`, status || null, {
+            layer: "tunnel",
+            tunnelOk: false,
+          });
           return;
         }
 
@@ -96,8 +111,16 @@ export function checkReachability({
             );
           },
         );
-        secure.setTimeout(timeoutMs, () => finish(false, "隧道建立后没有收到响应"));
-        secure.on("error", (err) => finish(false, `隧道建立后失败：${err.message}`));
+        secure.setTimeout(timeoutMs, () => finish(false, "隧道建立后没有收到响应", null, {
+          layer: "tls",
+          tunnelOk: true,
+          tlsOk: false,
+        }));
+        secure.on("error", (err) => finish(false, `隧道建立后失败：${err.message}`, null, {
+          layer: "tls",
+          tunnelOk: true,
+          tlsOk: false,
+        }));
 
         let resp = "";
         secure.on("data", (chunk) => {
@@ -109,14 +132,23 @@ export function checkReachability({
             // HTTP/1.1 头部，但我们确实完成了 TLS 握手、也收到了对端数据，
             // 这已经证明「经代理能到达对端」—— 判成失败是误报。
             if (looksLikeHttp2(resp)) {
-              finish(true, `${target} 可达（HTTP/2 端点）`, null);
+              finish(true, `${target} 收到 HTTP/2 帧，服务未验证`, null, {
+                layer: "http2",
+                tunnelOk: true,
+                tlsOk: true,
+              });
             }
             return;
           }
           const code =
             Number(/^HTTP\/1\.\d (\d+)/.exec(resp.slice(0, headEnd))?.[1] ?? 0);
-          // 4xx 也算通：说明请求真的到了对端，只是这个 URL 不接受 GET。
-          finish(code > 0 && code < 500, `${target} 返回 ${code}`, code || null);
+          // 收到 HTTP 只说明隧道到达。401/403/429 保留状态，不能当成模型或账号成功。
+          finish(code > 0 && code < 500, `${target} HTTP ${code}，服务未验证`, code || null, {
+            layer: "http",
+            tunnelOk: true,
+            tlsOk: true,
+            httpStatus: code || null,
+          });
         });
       };
       socket.on("data", onData);
@@ -133,9 +165,17 @@ export function checkReachability({
 export function looksLikeHttp2(buf) {
   if (!buf || buf.length < 9) return false;
   if (buf.startsWith("HTTP/")) return false;
-  const first = buf.charCodeAt(0);
-  // 文本首字节都是可打印字符（H=72 等），h2 帧长首字节通常是小控制字符
-  return first < 0x20 || first === 0x7f;
+  const raw = Buffer.from(buf, "latin1");
+  const length = (raw[0] << 16) | (raw[1] << 8) | raw[2];
+  const type = raw[3];
+  if (type > 0x09 || length > 16384) return false;
+  const streamId = raw.readUInt32BE(5) & 0x7fffffff;
+  // SETTINGS 必须在流 0。DATA 在流 0 上是非法帧，全 0 字节不能算验证成功。
+  if (type === 0x4) return streamId === 0;
+  if (type === 0x0) return streamId > 0;
+  if (type === 0x1 || type === 0x3 || type === 0x8) return streamId > 0;
+  if (type === 0x7) return true;
+  return false;
 }
 
 /**
@@ -174,8 +214,10 @@ export async function checkTargets({
 export function summarizeResults(results) {
   const required = results.filter((r) => !r.optional);
   const ok = required.length > 0 && required.every((r) => r.ok);
+  const serviceVerified = required.length > 0 && required.every((r) => r.serviceVerified === true);
   return {
     ok,
+    serviceVerified,
     results,
     failedRequired: required.filter((r) => !r.ok),
     failedOptional: results.filter((r) => !r.ok && r.optional),
