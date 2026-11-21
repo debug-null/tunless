@@ -8,10 +8,7 @@ import { Box, Text } from "ink";
 import { h, useTheme, useUnicode } from "../ui.js";
 import { padEnd, truncate } from "../width.js";
 import { symbolSet } from "../theme.js";
-import { rowsFor } from "../../core/status-rows.js";
-
-const STATUS_ORDER = ["service", "upstream", "internal"];
-const STATUS_LABEL = { service: "转发服务", upstream: "上游代理", internal: "内网分流" };
+import { overviewLines } from "../../core/status-rows.js";
 
 export function Workbench({
   state,
@@ -39,15 +36,13 @@ export function Workbench({
     })[status] ?? theme.colors.text;
 
   const side = state.sidecar ?? {};
-  const brief = STATUS_ORDER.map((id) =>
-    rowsFor(state).find((r) => r.id === id),
-  ).filter(Boolean);
   const divider = ` ${symbols.hline.repeat(Math.min(62, Math.max(20, width - 4)))}`;
 
   // 已安装的工具才是可操作对象 —— 探测中的（installed === undefined）不往里放
   const apps = (state.apps ?? []).filter((a) => a.installed === true);
   const idx = apps.length ? Math.min(appIndex, apps.length - 1) : 0;
   const currentApp = apps[idx];
+  const brief = overviewLines(state, { app: currentApp, reach: state.reach ?? null });
 
   const runningText = (app) =>
     app.running
@@ -73,20 +68,13 @@ export function Workbench({
     return { text: "—", color: theme.colors.muted };
   };
 
-  const actionText = (app) =>
-    app.proxied === "ok" ? "[回车 实测连通]" : "[回车 一键配置]";
+  const actionText = () => "[回车 测隧道]";
 
   const detailFor = (app) => {
     if (executing) return `正在执行：${executing}…`;
-    if (app.proxied === "ok") {
-      return `已走 tunless 代理（127.0.0.1:${side.httpPort ?? 8899}），回车实测连通性，不通再按一次重启修复`;
-    }
-    if (app.proxied === "stale") return "还连着旧代理，回车改走 tunless 并重启";
-    if (app.proxied === "probe-error") return "连接探测没跑成（lsof 没返回），回车重新注入代理";
-    if (app.id === "codex") {
-      return "回车把代理写入 ~/.codex/.env（终端与桌面客户端共用）";
-    }
-    return "回车配置代理并受控重启";
+    if (!side.running) return "转发服务没在听。空格启动后再回车测隧道。回车不会改配置";
+    if (app.proxied === "stale") return "还连着别的端口。回车只测隧道，c 才进入配置，写入要再按 y";
+    return "回车只测这条隧道，不改配置。c 配置，u 上游，d 域名";
   };
 
   const hintColor = /✔|\+/.test(hint)
@@ -115,11 +103,11 @@ export function Workbench({
         h(
           Box,
           { key: row.id },
-          h(Text, { dimColor: true }, padEnd(STATUS_LABEL[row.id], 5)),
+          h(Text, { dimColor: true }, padEnd(row.label || "", 8)),
           h(
             Text,
             { color: tone(row.status), bold: row.status !== "unknown" },
-            truncate(`${mark[row.status] ?? "?"} ${row.detail ?? ""}`, Math.max(10, width - 12)),
+            truncate(`${mark[row.status] ?? "?"} ${row.detail ?? ""}`, Math.max(10, width - 16)),
           ),
         ),
       ),

@@ -491,7 +491,12 @@ export async function discoverUpstream({
   const chosen = pickUpstream(candidates);
   return {
     upstream: chosen
-      ? { host: chosen.host, port: chosen.port, protocols: chosen.protocols }
+      ? {
+          host: chosen.host,
+          port: chosen.port,
+          protocols: chosen.protocols,
+          authRequired: chosen.authRequired ?? [],
+        }
       : null,
     chosen,
     candidates,

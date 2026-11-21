@@ -94,6 +94,96 @@ function internalRow(state) {
     : row("internal", "unknown", "没有内网域名需要分流");
 }
 
+/**
+ * 主屏五行。网络隧道和模型验证分开，403/429 和国家样本都不能写成可用。
+ */
+export function overviewLines(state, { app = null, reach = null } = {}) {
+  const side = state?.sidecar ?? {};
+  const listen = state?.loading
+    ? line("listen", "unknown", "转发服务", "探测中")
+    : line(
+        "listen",
+        side.running && side.httpOpen ? "ok" : side.running ? "warn" : side.installed ? "bad" : "warn",
+        "转发服务",
+        [
+          side.running ? `pid ${side.pid ?? "?"}` : side.installed ? "已停止" : "未安装",
+          `HTTP ${side.httpOpen ? "开" : "关"} :${side.httpPort ?? 8899}`,
+          `SOCKS ${side.socksOpen ? "开" : "关"} :${side.socksPort ?? 8898}`,
+        ].join(" · "),
+      );
+
+  const chosen = state?.upstream?.chosen;
+  const authOnly = (state?.upstream?.candidates ?? []).filter(
+    (c) => c.authRequired?.length && !c.protocols?.length,
+  );
+  let upstream;
+  if (state?.loading) upstream = line("upstream", "unknown", "上游代理", "探测中");
+  else if (state?.upstream?.drift) upstream = line("upstream", "warn", "上游代理", state.upstream.drift);
+  else if (chosen?.authRequired?.length && !chosen?.protocols?.length) {
+    upstream = line(
+      "upstream",
+      "warn",
+      "上游代理",
+      `${chosen.host}:${chosen.port} 需要认证（${chosen.authRequired.join("+")}），未使用`,
+    );
+  } else if (chosen?.protocols?.length) {
+    const note = describeEgress(state?.egress);
+    upstream = line(
+      "upstream",
+      note?.restricted ? "warn" : "ok",
+      "上游代理",
+      `${chosen.host}:${chosen.port} ${chosen.protocols.join("+")}${note ? ` · ${note.text}` : ""}`,
+    );
+  } else if (authOnly.length) {
+    const c = authOnly[0];
+    upstream = line(
+      "upstream",
+      "warn",
+      "上游代理",
+      `${c.host}:${c.port} 需要认证（${c.authRequired.join("+")}），未使用`,
+    );
+  } else upstream = line("upstream", "bad", "上游代理", "没有免认证的 HTTP/SOCKS");
+
+  let appLine;
+  if (!app) appLine = line("app", "unknown", "应用路径", "还没选工具");
+  else if (app.proxied === "ok") appLine = line("app", "ok", "应用路径", `${app.name} 观察到连着本机代理`);
+  else if (app.proxied === "stale") appLine = line("app", "warn", "应用路径", `${app.name} 还连着别的本地端口`);
+  else if (app.proxied === "probe-error") appLine = line("app", "unknown", "应用路径", `${app.name} 连接没读到`);
+  else if (!app.running) appLine = line("app", "unknown", "应用路径", `${app.name} 没在运行，没有连接证据`);
+  else appLine = line("app", "unknown", "应用路径", `${app.name} 在运行，此刻没有代理连接`);
+
+  const codes = (reach?.results ?? [])
+    .map((r) => r.httpStatus)
+    .filter((code) => Number.isFinite(code));
+  let netLine;
+  let modelLine;
+  if (!reach) {
+    netLine = line("net", "unknown", "网络隧道", "还没测");
+    modelLine = line("model", "unknown", "模型", "未验证，没有账号调用");
+  } else if (reach.serviceVerified) {
+    netLine = line("net", "ok", "网络隧道", "已到达对端");
+    modelLine = line("model", "ok", "模型", "这次调用已验证");
+  } else if (reach.ok) {
+    netLine = line(
+      "net",
+      "warn",
+      "网络隧道",
+      `已到达${codes.length ? `，HTTP ${codes.join("/")}` : ""}。401/403/429 不是可用`,
+    );
+    modelLine = line("model", "unknown", "模型", "未验证");
+  } else {
+    netLine = line("net", "bad", "网络隧道", "没建立。这不等于模型被拒绝");
+    modelLine = line("model", "unknown", "模型", "未验证");
+  }
+
+  const internal = rowsFor(state).find((r) => r.id === "internal");
+  return [listen, upstream, appLine, netLine, modelLine, { ...internal, label: "内网分流" }];
+}
+
+function line(id, status, label, detail) {
+  return { id, status, label, detail };
+}
+
 export function rowsFor(state) {
   return ROW_ORDER.map((id) =>
     ({ service: serviceRow, upstream: upstreamRow, tools: toolsRow, internal: internalRow })[id](state));

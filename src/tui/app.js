@@ -74,6 +74,7 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
   const [appId, setAppId] = useState(null);
   // 第 2 步：选中的处理方式 + 执行结果
   const [actionIndex, setActionIndex] = useState(0);
+  const [writeArmed, setWriteArmed] = useState(false);
   // 第 2 步：选哪个上游代理（探测出来的候选，或手动填）
   const [upstreamIndex, setUpstreamIndex] = useState(0);
   const [editingUpstream, setEditingUpstream] = useState(false);
@@ -145,7 +146,19 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     }
   }, [appId, state.sidecar?.httpPort]);
 
+  const refreshGen = useRef(0);
+  const refreshing = useRef(false);
   const refresh = useCallback(async () => {
+    if (refreshing.current) {
+      refreshGen.current += 1;
+      refreshing.current = false;
+      setBusy(false);
+      setProgress("");
+      setHint("检测已取消。按 r 再测一次");
+      return null;
+    }
+    const gen = (refreshGen.current += 1);
+    refreshing.current = true;
     setBusy(true);
     setProgress("正在采集…");
     try {
@@ -154,21 +167,28 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         repoRoots,
         includeChrome,
         onProgress: (stage, partial) => {
+          if (gen !== refreshGen.current) return;
           setProgress(stage);
           setState((prev) => ({ ...prev, ...partial }));
         },
       });
+      if (gen !== refreshGen.current) return null;
       setState(next);
       await refreshLive();
       log(`状态已更新（内网域名 ${next.internalDomains.length} 个）`, "ok");
-      setBusy(false);
-      setProgress("");
       return next;
     } catch (err) {
-      log(`刷新失败：${err.message}`, "bad");
-      setBusy(false);
-      setProgress("");
+      if (gen === refreshGen.current) {
+        log(`刷新失败：${err.message}。按 r 重试`, "bad");
+        setHint(`刷新失败：${err.message}。按 r 重试`);
+      }
       return null;
+    } finally {
+      if (gen === refreshGen.current) {
+        refreshing.current = false;
+        setBusy(false);
+        setProgress("");
+      }
     }
   }, [internalDns, repoRoots, includeChrome, log, refreshLive]);
 
@@ -800,6 +820,23 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     if (screen === "dashboard") {
       const apps = (state.apps ?? []).filter((a) => a.installed === true);
 
+      if (input === "c") {
+        const app = apps[Math.min(appIndex, Math.max(0, apps.length - 1))];
+        if (!app) {
+          setHint("没有可配置的已安装工具");
+          return;
+        }
+        setAppId(app.id);
+        setAppName(app.name);
+        setActionIndex(0);
+        setWriteArmed(false);
+        setScreen("wizard");
+        setWizardStep(3);
+        setWizardDone(false);
+        setStepResult(null);
+        setHint("配置不会自动写入。选中会改文件的项后回车，再按 y 确认");
+        return;
+      }
       if (input === "g") {
         setScreen("wizard");
         setWizardStep(1);
@@ -833,48 +870,27 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
         const app = apps[Math.min(appIndex, Math.max(0, apps.length - 1))];
         if (!app) return;
 
-        // 配置路径：按应用挑动作 —— Codex 没有 settings.json，「注入+启动」
-        // 对它没意义；actionsFor 返回的是这个应用的真实选项。
-        const configure = () => {
-          const ids = actionsFor(app.id).map((a) => a.id);
-          const actionId = ids.includes("env+settings") ? "env+settings" : ids[0];
-          setHint("");
-          setExecuting(`正在为 ${app.name} 配置代理`);
-          applyAppAction(app, actionId).then((res) => {
-            setExecuting(null);
-            if (res) {
-              setHint(typeof res === "string" ? res : `✔ ${app.name} 代理配置已生效`);
-            }
-          });
-        };
-
-        // 第二阶段：上次实测没过，这次回车是「重启修复」。
-        if (pendingFix === app.id) {
-          setPendingFix(null);
-          setExecuting(`正在重启 ${app.name} 并注入代理`);
-          configure();
+        if (!state.sidecar?.running) {
+          setHint("转发服务没在听。按空格启动后再回车测隧道。这一步不改配置");
           return;
         }
-
-        if (app.proxied === "ok") {
-          // 先真测：经 sidecar 打这个工具自己的目标。测的是隧道层——
-          // 隧道通但应用内部状态坏的情况也存在，所以无论结果如何，
-          // 再按一次回车都给「重启并重新注入」这条修复路径。
-          setHint("");
-          runReach(app.id).then((r) => {
-            if (!r) return;
-            const okCount = r.results.filter((x) => x.ok).length;
-            setPendingFix(app.id);
-            setHint(
-              r.ok
-                ? `✔ ${app.name} 连通正常（${okCount}/${r.results.length} 个目标可达）— 仍有问题？再按回车重启并重新注入`
-                : `✖ ${app.name} 有 ${r.results.length - okCount}/${r.results.length} 个目标不通 — 再按回车重启并注入代理`,
-            );
-          });
+        if (executing || busy) {
+          setHint("检测还在跑。再按 r 取消");
           return;
         }
-
-        configure();
+        setHint("");
+        runReach(app.id).then((r) => {
+          if (!r) return;
+          const codes = r.results.map((x) => x.httpStatus).filter((n) => Number.isFinite(n));
+          setState((prev) => ({ ...prev, reach: r }));
+          setHint(
+            r.serviceVerified
+              ? `${app.name} 模型调用已验证`
+              : r.ok
+                ? `${app.name} 隧道到达${codes.length ? ` HTTP ${codes.join("/")}` : ""}，模型未验证`
+                : `${app.name} 隧道没建立。模型仍是未验证，按 c 看配置`,
+          );
+        });
         return;
       }
       if (key.upArrow || input === "k") {
@@ -1063,21 +1079,41 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
     }
 
     if (wizardStep === 3) {
+      const writesFiles = (id) => id === "settings" || id === "env+settings";
       if (key.escape) {
+        setWriteArmed(false);
         setWizardStep(2);
         setStepResult(null);
         return;
       }
-      if (key.upArrow) {
-        setActionIndex((i) => Math.max(0, i - 1));
+      const confirmNow = writeArmed && input === "y";
+      if (writeArmed && !confirmNow) {
+        setWriteArmed(false);
+        if (key.upArrow) {
+          setActionIndex((i) => Math.max(0, i - 1));
+          return;
+        }
+        if (key.downArrow) {
+          const total = actionsFor(appId).length;
+          setActionIndex((i) => Math.min(Math.max(0, total - 1), i + 1));
+          return;
+        }
+        setHint("已取消写入。方向键另选，或 Esc 返回");
         return;
       }
-      if (key.downArrow) {
-        const total = actionsFor(appId).length;
-        setActionIndex((i) => Math.min(Math.max(0, total - 1), i + 1));
-        return;
+      if (confirmNow) setWriteArmed(false);
+      if (!writeArmed) {
+        if (key.upArrow) {
+          setActionIndex((i) => Math.max(0, i - 1));
+          return;
+        }
+        if (key.downArrow) {
+          const total = actionsFor(appId).length;
+          setActionIndex((i) => Math.min(Math.max(0, total - 1), i + 1));
+          return;
+        }
       }
-      if (key.return) {
+      if (key.return || confirmNow) {
         // 动作在跑时回车不能再起一个 —— 与 apps 屏同一个守卫。
         if (executing || busy) return;
         if (stepResult) {
@@ -1086,6 +1122,12 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
           setWizardStep(4);
           setHint("");
           runReach();
+          return;
+        }
+        const pending = actionsFor(appId)[actionIndex];
+        if (pending && writesFiles(pending.id) && !confirmNow) {
+          setWriteArmed(true);
+          setHint(`将写入 ${appName} 的配置文件。按 y 确认，其它键取消`);
           return;
         }
         if (!state.sidecar.running) {
@@ -1328,11 +1370,12 @@ export function App({ internalDns, repoRoots = [], includeChrome = false }) {
 // 仪表盘底栏按键：直观精炼，6 项常用操作
 const DASHBOARD_KEYS = [
   ["↑↓", "选工具"],
-  ["回车", "一键生效/测速"],
-  ["空格", "启停服务"],
+  ["回车", "测隧道"],
+  ["c", "配置"],
+  ["空格", "启停"],
   ["u", "上游"],
   ["d", "域名"],
-  ["h", "更多"],
+  ["r", "刷新/取消"],
   ["q", "退出"],
 ];
 
