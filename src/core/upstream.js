@@ -49,6 +49,15 @@ export function labelForProcess(command) {
   return hit ? hit.label : null;
 }
 
+/** 界面和 doctor 只显示进程名，不打印命令行参数。参数里可能有 token。 */
+export function displayProcess(command) {
+  const known = labelForProcess(command);
+  if (known) return known;
+  const exe = String(command || "").trim().split(/\s+/)[0] || "";
+  const base = exe.split("/").pop() || "进程";
+  return base.slice(0, 40);
+}
+
 /**
  * 当前正在用的客户端是谁。
  *
@@ -437,7 +446,7 @@ export async function discoverUpstream({
     raw.push({
       ...row,
       source: label ? "known-process" : "listening",
-      label: label ?? row.process,
+      label: displayProcess(row.process),
       priority: label ? 2 : 3,
     });
   }

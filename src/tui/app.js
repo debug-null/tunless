@@ -1410,6 +1410,8 @@ export async function runTui(options = {}) {
 
   // 调试模式：每帧以纯文本追加输出，方便在没有终端模拟器时观察界面内容。
   const debug = process.env.TUNLESS_TUI_DEBUG === "1";
+  const onSigint = () => process.exit(130);
+  process.on("SIGINT", onSigint);
   const instance = render(
     h(ThemeProvider, { theme, unicode }, h(App, options)),
     {
